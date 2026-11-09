@@ -57,6 +57,16 @@ pip install soundfile httpx edge-tts
 > `%USERPROFILE%\.cache\torch\hub\checkpoints\`（Windows）；
 > 也可设置环境变量 `TORCH_HOME` 指向可写目录。文件名必须与 torchvision 期望的一致（默认即 `resnet18-f37072fd.pth`）。
 
+## 演示前检查
+
+答辩与现场演示前逐条过一遍，任何一条不过就会当场掉链子：
+
+- [ ] **中文字体**：Windows 自带微软雅黑即可；Linux 需装 Noto CJK，否则标注图上的中文显示成方框。
+- [ ] **摄像头**：设备管理器里能看到，且没被别的程序占用（Tab3 实时识别用；加分项，讲解时再开）。
+- [ ] **麦克风**：系统录音里能看到输入电平；Tab1「语音说名称」用，录不到就退回键盘录入。
+- [ ] **Edge TTS 需联网**：播报走微软在线服务，断网时界面会显示「语音播报不可用，请检查网络」，不是程序坏了。
+- [ ] **ResNet18 权重已预热**：`~/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth`（Windows 为 `%USERPROFILE%\.cache\torch\hub\checkpoints\`）已存在，避免现场第一次运行临时下载约 45 MB。
+
 ## 使用
 
 ### 命令行（验收与批处理）
