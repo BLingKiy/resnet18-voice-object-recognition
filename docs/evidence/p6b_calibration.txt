@@ -1,0 +1,20 @@
+# P6b 阈值校准证据（2026-11-09T10:52:01Z UTC）
+
+$ python tools/calibrate.py --library ~/.rn18/data/features.json --known-dir ~/.rn18/data/test --unknown-dir ~/.rn18/data/unknown
+
+特征库: C:\Users\NhNoK\.rn18\data\features.json
+当前（占位/已校准）阈值: 0.8124
+
+[已知类] 测试图 10 张
+  最高相似度  min=0.8828  max=0.9734  mean=0.9290
+    earphone   n=2   min=0.9219 max=0.9610
+    keyboard   n=2   min=0.9050 max=0.9237
+    mouse      n=2   min=0.9568 max=0.9734
+    power_bank n=2   min=0.8828 max=0.9239
+    water_cup  n=2   min=0.9026 max=0.9392
+
+[未知类] 样本 6 张
+  最高相似度  min=0.6282  max=0.7421  mean=0.6897
+
+建议阈值（已知 min 与未知 max 中点）: 0.8124
+→ 用 `python tools/demo_cli.py threshold --set <值>` 写回特征库。

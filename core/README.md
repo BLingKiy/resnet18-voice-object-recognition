@@ -105,7 +105,7 @@ for row in library.stats():
 3. **按物体取最大相似度**：多视角注册时，只要有一张注册图与查询图接近，
    就认为该物体接近；平均分会因为"没拍到的角度"被拖低。
 4. **阈值优先级**：显式参数 > 特征库 `threshold` > `DEFAULT_THRESHOLD`（0.60）。
-   0.60 只是占位值，必须用未参与录入的测试图校准后写回（T6）。
+   本项目已用未参与录入的测试图校准，库里写入 **0.8124**；0.60 只在库没有校准值时兜底。
 5. **未知判断是 `score < threshold`**：等于阈值算已知，避免边界抖动时来回跳。
 6. **重复图去重**：同一物体内按像素摘要去重，防止"向量条数 ≠ 注册图数"，
    也防止同一张图反复入库把该物体的 max 分数抬高。
@@ -126,8 +126,8 @@ python tools/demo_cli.py recognize --image data/test/苹果/t01.jpg --top-k 3
 # 批量 Top-1（目录结构 data/test/<物体名>/*.jpg）
 python tools/demo_cli.py eval --dir data/test
 
-# 写入校准阈值
-python tools/demo_cli.py threshold --set 0.63
+# 写入校准阈值（本项目实测值：已知 min 0.8828、未知 max 0.7421 的中点）
+python tools/demo_cli.py threshold --library ~/.rn18/data/features.json --set 0.8124
 ```
 
 所有命令支持 `--json`，便于把结果贴进报告。默认特征库是 `data/features.json`，
@@ -169,4 +169,5 @@ python -m pytest tests/test_integration_resnet.py -q
 - JSON 全量加载：25 条 512 维向量约 300KB，内存与耗时都可忽略；不建议再引入数据库。
 - 特征库 `model` 字段只做记录，不会自动迁移。换模型（例如 ResNet50）必须重建特征库，
   否则新旧向量不在同一特征空间，相似度没有意义。
-- 阈值 0.60 是占位值，未用真实测试集校准前，报告里的准确率不能当作最终结论。
+- 阈值已用课程数据校准为 0.8124（已知测试 10 张最低 0.8828、未知 6 张最高 0.7421），
+  但未知样本仅 3 类各 2 张，样本量偏小，实机换角度重拍后建议再复核一次。

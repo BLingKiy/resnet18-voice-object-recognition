@@ -1,0 +1,39 @@
+# P6b 写入阈值后两组验证（2026-11-09T10:52:57Z UTC）
+
+仓库 commit: c572d22（本次改动未提交时的基线）
+
+## 1) 已知测试集 Top-1
+$ python tools/demo_cli.py eval --library ~/.rn18/data/features.json --dir ~/.rn18/data/test
+
+测试集: C:\Users\NhNoK\.rn18\data\test
+阈值: 0.8124   图片数: 10
+
+[OK  ] earphone\01.jpg              真实=earphone 预测=earphone 相似度=0.9610
+[OK  ] earphone\02.jpg              真实=earphone 预测=earphone 相似度=0.9219
+[OK  ] keyboard\01.jpg              真实=keyboard 预测=keyboard 相似度=0.9050
+[OK  ] keyboard\02.jpg              真实=keyboard 预测=keyboard 相似度=0.9237
+[OK  ] mouse\01.jpg                 真实=mouse    预测=mouse    相似度=0.9568
+[OK  ] mouse\02.jpg                 真实=mouse    预测=mouse    相似度=0.9734
+[OK  ] power_bank\01.jpg            真实=power_bank 预测=power_bank 相似度=0.8828
+[OK  ] power_bank\02.jpg            真实=power_bank 预测=power_bank 相似度=0.9239
+[OK  ] water_cup\01.jpg             真实=water_cup 预测=water_cup 相似度=0.9392
+[OK  ] water_cup\02.jpg             真实=water_cup 预测=water_cup 相似度=0.9026
+
+Top-1 正确: 10/10   准确率: 100.00%
+
+## 2) 未知样本拒识
+$ python tools/unknown_check.py --library ~/.rn18/data/features.json --dir ~/.rn18/data/unknown
+
+特征库: C:\Users\NhNoK\.rn18\data\features.json
+阈值: 0.8124
+未知样本: C:\Users\NhNoK\.rn18\data\unknown（6 张）
+
+  乌龙茶      乌龙茶1.jpg       最近邻=water_cup    sim=0.6893 -> 正确拒识
+  乌龙茶      乌龙茶2.jpg       最近邻=water_cup    sim=0.7059 -> 正确拒识
+  充电头      充电头1.jpg       最近邻=power_bank   sim=0.7421 -> 正确拒识
+  充电头      充电头2.jpg       最近邻=earphone     sim=0.7362 -> 正确拒识
+  剪刀       剪刀1.jpg        最近邻=mouse        sim=0.6366 -> 正确拒识
+  剪刀       剪刀2.jpg        最近邻=mouse        sim=0.6282 -> 正确拒识
+
+拒识 6/6，误报 0/6（误报率 0.00%）
+最高分样本: 充电头/充电头1.jpg sim=0.7421（最近邻 power_bank），距阈值 +0.0703

@@ -2,8 +2,8 @@
 
 基于本地 ImageNet 预训练 **ResNet18** 的物体识别 Demo：多图录入并保存特征，输入图片返回最相似物体与相似度，相似度过低判为未知；带简单界面（录入 / 识别 / 查看），重启后特征库仍在。语音链路由百度短语音识别与 Edge TTS 播报组成；界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入。摄像头实时识别为加分项。
 
-> 运行结束重启后，`data/features.json` 仍在，无需重新录入。
-> 课程数据在本仓库 `data/` 下：`data/known/<物体名>/`（注册图，每物体 5 张）、`data/test/<物体名>/`（测试图，每物体 2 张，与注册图严格分开）。图片与特征库都不入库，只有 `data/manifest.csv` 清单随仓库提交。
+> 运行结束重启后，特征库 JSON 仍在，无需重新录入。
+> 课程数据默认放在 `~/.rn18/data/`（Windows 为 `%USERPROFILE%\.rn18\data\`）：`known/<物体名>/`（注册图，每物体 5 张）、`test/<物体名>/`（测试图，每物体 2 张，与注册图严格分开）、`unknown/<物体名>/`（未录入物体，3 类各 2 张，只用于校准）。图片与特征库都不入库，只有 `data/manifest.csv` 清单随仓库提交。
 
 ## 为什么有这个项目
 
@@ -16,11 +16,11 @@
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 
-# 2. 录入物体（每个物体 5 张以上，目录结构 data/known/<物体名>/*.jpg）
-python tools/demo_cli.py add --name water_cup --dir data/known/water_cup
+# 2. 录入物体（每个物体 5 张以上，目录结构 ~/.rn18/data/known/<物体名>/*.jpg）
+python tools/demo_cli.py add --name water_cup --dir ~/.rn18/data/known/water_cup
 
 # 3. 识别一张测试图（首次运行会联网下载约 45 MB 的 ResNet18 权重，之后离线可用）
-python tools/demo_cli.py recognize --image data/test/water_cup/01.jpg --top-k 3
+python tools/demo_cli.py recognize --image ~/.rn18/data/test/water_cup/01.jpg --top-k 3
 ```
 
 启动图形界面：
@@ -73,23 +73,34 @@ pip install soundfile httpx edge-tts
 
 ```bash
 # 逐个物体录入（目录或显式文件列表）
-python tools/demo_cli.py add --name power_bank --dir data/known/power_bank
-python tools/demo_cli.py add --name earphone   --dir data/known/earphone
+python tools/demo_cli.py add --library ~/.rn18/data/features.json --name power_bank --dir ~/.rn18/data/known/power_bank
+python tools/demo_cli.py add --library ~/.rn18/data/features.json --name earphone   --dir ~/.rn18/data/known/earphone
 
 # 查看特征库（物体数 / 向量条数 / 阈值）
-python tools/demo_cli.py stats
+python tools/demo_cli.py stats --library ~/.rn18/data/features.json
 
 # 单图识别，展示前 3 个近邻
-python tools/demo_cli.py recognize --image data/test/power_bank/01.jpg --top-k 3
+python tools/demo_cli.py recognize --library ~/.rn18/data/features.json --image ~/.rn18/data/test/power_bank/01.jpg --top-k 3
 
 # 批量 Top-1 评测（目录结构 data/test/<物体名>/*.jpg）
-python tools/demo_cli.py eval --dir data/test --json
+python tools/demo_cli.py eval --library ~/.rn18/data/features.json --dir ~/.rn18/data/test --json
 
 # 阈值校准（见下方"阈值与未知判断"）
-python tools/calibrate.py --known-dir data/test --unknown-dir data/unknown
+python tools/calibrate.py --library ~/.rn18/data/features.json --known-dir ~/.rn18/data/test --unknown-dir ~/.rn18/data/unknown
 ```
 
+> 特征库默认路径是仓库内 `data/features.json`；用 `--library` 或环境变量 `RN18_LIBRARY_PATH` 指向 `~/.rn18/data/features.json` 即可复用已校准的库。两者必居其一，不要混用。
+
 所有命令都支持 `--json`，便于把结果贴进报告或做自动化断言。
+
+### 测试
+
+```bash
+python -m pytest tests -q                      # 142 passed, 4 skipped
+RUN_RESNET_TESTS=1 python -m pytest tests -q   # 145 passed, 1 skipped（含真实权重端到端）
+```
+
+默认跳过 4 项：3 项真实 ResNet 端到端（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 合成（需联网 + `RN18_TTS_LIVE=1`）。唯一必须联网的 TTS 用例在无网环境不跑，不会伪造结果。
 
 ### 图形界面
 
@@ -134,24 +145,46 @@ BAIDU_ASR_DEV_PID=1537
 
 ## 阈值与未知判断（重要）
 
-判定规则：**最高相似度 < 阈值** 即判为"未知物体"。阈值当前是核心层里的**占位值 `0.60`**，必须用**未参与录入**的测试图校准后写回，不能把占位值当作最终结论。
+判定规则：**最高相似度 < 阈值** 即判为"未知物体"。本项目阈值已用未参与录入的图片校准为 **`0.8124`**，并写进特征库 JSON 的 `threshold` 字段，程序启动时自动生效。
 
-校准步骤（`tools/calibrate.py`）：
+校准依据：两条分布的实际数值（`data/test` 10 张已知 + `data/unknown` 6 张未知）
 
-1. 用 `data/test/<物体名>/` 的已知类测试图统计"已知类最高相似度"分布；
-2. 用 `data/unknown/<物体名>/`（≥3 类、每类 2~3 张）统计"未知类最高相似度"分布；
-3. 取"已知类最小值"与"未知类最大值"的中点作为建议阈值，写回特征库：
-   `python tools/demo_cli.py threshold --set <建议值>`。
+| 分布 | 样本数 | min | max | mean |
+|------|-------|-----|-----|------|
+| 已知类（测试图，未参与录入） | 10 | 0.8828 | 0.9734 | 0.9290 |
+| 未知类（3 类未录入物体） | 6 | 0.6282 | 0.7421 | 0.6897 |
 
-> 当前阶段（验收前）未知类样本尚未采集，`calibrate.py` 会显式输出"待补数据"，**不会生成或引用任何未知判断的最终结论**。注册图与测试图必须严格分开，否则阈值会被自己污染。
+两条分布间隙 0.1407，取中点 `(0.8828 + 0.7421) / 2 = 0.8124`，两侧余量各约 0.070。写入后复跑：已知 10/10 通过（准确率 100%），未知 6/6 拒识（误报率 0%）。
+
+注意区分两个值：
+
+- `features.json` 里的 `threshold = 0.8124` 是**校准结果**，程序优先用它；
+- `core/recognize.py` 的 `DEFAULT_THRESHOLD = 0.60` 只是**库没有校准值时的兜底**，不是本项目的结论。用 `python tools/demo_cli.py threshold` 可以查看当前生效值。
+
+重新校准（换数据或换角度重拍后）：
+
+```bash
+# 1. 看两条分布，读建议阈值
+python tools/calibrate.py --known-dir ~/.rn18/data/test --unknown-dir ~/.rn18/data/unknown
+
+# 2. 写回特征库
+python tools/demo_cli.py threshold --library ~/.rn18/data/features.json --set 0.8124
+
+# 3. 复跑两组验证
+python tools/demo_cli.py eval --library ~/.rn18/data/features.json --dir ~/.rn18/data/test --json
+python tools/unknown_check.py --library ~/.rn18/data/features.json --dir ~/.rn18/data/unknown
+```
+
+> **校准集纪律**：校准只能用 `test/` 与 `unknown/`，注册图（`known/`）绝不允许进校准集，否则阈值会自己污染自己。本次三类样本 md5 两两零重叠。
 
 ## 数据与特征库格式
 
-- 注册图：`data/known/<物体名>/*.jpg`（每物体 ≥5 张；本仓库为 `power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
-- 测试图：`data/test/<物体名>/*.jpg`（每物体 ≥2 张，与注册图严格分开）
-- 未知类：`data/unknown/<物体名>/*.jpg`（≥3 类，验收前补齐）
+- 注册图：`~/.rn18/data/known/<物体名>/*.jpg`（每物体 5 张；`power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
+- 测试图：`~/.rn18/data/test/<物体名>/*.jpg`（每物体 2 张，与注册图严格分开，不参与录入）
+- 未知样本：`~/.rn18/data/unknown/<物体名>/*.jpg`（3 类各 2 张：乌龙茶、充电头、剪刀，只用于阈值校准）
+- 规模：5 物体 × 7 张（5 注册 + 2 测试）= 35 张，另加 3 类未知 × 2 张 = 6 张，合计 41 张
 - 清单：`data/manifest.csv` 是**唯一入库清单**，35 行 = 25 张 known + 10 张 test，按**文件字节 SHA-256** 去重，35 个摘要全不相同（CSV 第 4 列列名沿用 `md5`，实际值为 SHA-256）
-- 特征库：`data/features.json`（JSON，版本 1，512 维，L2 归一化；原子写入，重启不丢）
+- 特征库：JSON，版本 1，512 维，L2 归一化，25 条向量，约 300 KB；原子写入，重启不丢
 
 ## 文档与交付物
 
