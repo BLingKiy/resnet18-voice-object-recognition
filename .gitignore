@@ -15,3 +15,7 @@ acl-recovery/
 
 # 原子写入的残留临时文件
 *.tmp
+
+# 本地密钥配置：只提交 .env.example，真实 .env 绝不入库
+.env
+.env.local
