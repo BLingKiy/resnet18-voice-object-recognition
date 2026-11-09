@@ -1,13 +1,13 @@
 # ResNet18 语音物体识别 Demo
 
-基于本地 ImageNet 预训练 **ResNet18** 的物体识别 Demo：多图录入并保存特征，输入图片返回最相似物体与相似度，相似度过低判为未知；支持**语音录入物体名称**（百度短语音识别）与**语音播报识别结果**（Edge TTS），并带有简单界面（录入 / 识别 / 查看）。摄像头实时识别为加分项。
+基于本地 ImageNet 预训练 **ResNet18** 的物体识别 Demo：多图录入并保存特征，输入图片返回最相似物体与相似度，相似度过低判为未知；带简单界面（录入 / 识别 / 查看），重启后特征库仍在。语音链路由百度短语音识别（模块已实现）与 Edge TTS 播报（P4 待实现）组成，当前界面用键盘录入、文本与标注图展示结果。摄像头实时识别为加分项。
 
-> 备用说明：本仓库的 `data/` 目录即特征库与数据集的根。运行结束重启后，`data/features.json` 仍在，无需重新录入。
-> 课程数据（35 张照片）放在 `%USERPROFILE%\.rn18\dataset\`（Windows）下：`known\<物体>\`（注册图，每物体 5 张）、`test\<物体>\`（测试图，每物体 2 张，与注册图严格分开）。
+> 运行结束重启后，`data/features.json` 仍在，无需重新录入。
+> 课程数据在本仓库 `data/` 下：`data/known/<物体名>/`（注册图，每物体 5 张）、`data/test/<物体名>/`（测试图，每物体 2 张，与注册图严格分开）。图片与特征库都不入库，只有 `data/manifest.csv` 清单随仓库提交。
 
 ## 为什么有这个项目
 
-作业要求做一个"能认东西"的本地 Demo，但不能依赖在线识别接口、服务器或手机 App。我们选择 ResNet18 取 512 维特征 + 余弦相似度：模型本地跑、特征库就是一个 JSON 文件，**零部署、可离线、重启不丢数据**。语音只用百度短语音识别（录入名称）和 Edge TTS（播报结果）两个轻量接口，且缺密钥时自动降级为纯键盘操作。
+作业要求做一个"能认东西"的本地 Demo，但不能依赖在线识别接口、服务器或手机 App。我们选择 ResNet18 取 512 维特征 + 余弦相似度：模型本地跑、特征库就是一个 JSON 文件，**零部署、可离线、重启不丢数据**。语音识别只用百度短语音识别（录入名称），语音播报计划用 Edge TTS（P4 待实现）；缺密钥或依赖时降级为纯键盘操作。
 
 ## 快速开始（到"能跑"的最短路径）
 
@@ -16,14 +16,11 @@
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 
-# 2. 首次运行会联网下载约 45 MB 的 ResNet18 权重（之后离线可用）
-python tools/demo_cli.py stats        # 触发模型加载与权重缓存
+# 2. 录入物体（每个物体 5 张以上，目录结构 data/known/<物体名>/*.jpg）
+python tools/demo_cli.py add --name water_cup --dir data/known/water_cup
 
-# 3. 录入物体（每个物体 5 张以上，目录结构 data/known/<物体名>/*.jpg）
-python tools/demo_cli.py add --name 水杯 --dir data/known/水杯
-
-# 4. 识别一张图
-python tools/demo_cli.py recognize --image data/test/水杯/t01.jpg --top-k 3
+# 3. 识别一张测试图（首次运行会联网下载约 45 MB 的 ResNet18 权重，之后离线可用）
+python tools/demo_cli.py recognize --image data/test/water_cup/01.jpg --top-k 3
 ```
 
 启动图形界面：
@@ -44,8 +41,8 @@ python app.py
 | numpy | ≥ 1.23 | 特征计算 |
 | Pillow | 最新 | 图片解码与预处理 |
 | gradio | ≥ 4 | 图形界面（Tab1 录入 / Tab2 识别） |
-| soundfile / httpx | 最新 | **语音录入**才需要（百度 ASR）；缺了也能跑键盘模式 |
-| edge-tts | 最新 | **语音播报**才需要；缺了也能跑纯文本模式 |
+| soundfile / httpx | 最新 | **语音识别**才需要（百度 ASR）；缺了也能跑键盘模式 |
+| edge-tts | 最新 | **语音播报**才需要（P4 待实现）；缺了也能跑纯文本模式 |
 
 安装（pip，任选其一）：
 
@@ -66,14 +63,14 @@ pip install soundfile httpx edge-tts
 
 ```bash
 # 逐个物体录入（目录或显式文件列表）
-python tools/demo_cli.py add --name 充电宝 --dir data/known/充电宝
-python tools/demo_cli.py add --name 耳机   --dir data/known/耳机
+python tools/demo_cli.py add --name power_bank --dir data/known/power_bank
+python tools/demo_cli.py add --name earphone   --dir data/known/earphone
 
 # 查看特征库（物体数 / 向量条数 / 阈值）
 python tools/demo_cli.py stats
 
 # 单图识别，展示前 3 个近邻
-python tools/demo_cli.py recognize --image data/test/充电宝/t02.jpg --top-k 3
+python tools/demo_cli.py recognize --image data/test/power_bank/01.jpg --top-k 3
 
 # 批量 Top-1 评测（目录结构 data/test/<物体名>/*.jpg）
 python tools/demo_cli.py eval --dir data/test --json
@@ -90,7 +87,7 @@ python tools/calibrate.py --known-dir data/test --unknown-dir data/unknown
 - **Tab2 · 单图识别**：上传一张测试图 → 点「开始识别」。页面显示物体名、相似度（含百分比）、是否未知，以及前 3 个近邻和标注图（绿框=已知，红框=未知）。
 - **刷新特征库**：从磁盘重新读取 `data/features.json`，用于验证"重启后特征库仍在"。
 
-语音链路（录入名称 + 播报结果）在 `voice/asr.py`（百度短语音识别）与 Edge TTS 封装中。缺密钥时界面自动置灰语音入口，**键盘录入与文本结果显示照常**，程序不崩溃。
+语音识别封装在 `voice/asr.py`（百度短语音识别），**当前尚未接进界面**：`app.py` 只有 Tab1 键盘录入与 Tab2 静态识别，没有语音按钮。未配置密钥时 `asr()` 抛 `AsrNotConfigured`（可捕获，不崩溃），界面置灰语音入口属于**预留接口、待接线**。语音播报（Edge TTS）为 P4 待实现。
 
 ## 配置（`.env`）
 
@@ -136,9 +133,10 @@ BAIDU_ASR_DEV_PID=1537
 
 ## 数据与特征库格式
 
-- 注册图：`data/known/<物体名>/*.jpg`（每物体 ≥5 张）
+- 注册图：`data/known/<物体名>/*.jpg`（每物体 ≥5 张；本仓库为 `power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
 - 测试图：`data/test/<物体名>/*.jpg`（每物体 ≥2 张，与注册图严格分开）
 - 未知类：`data/unknown/<物体名>/*.jpg`（≥3 类，验收前补齐）
+- 清单：`data/manifest.csv` 是**唯一入库清单**，35 行 = 25 张 known + 10 张 test，按**文件字节 SHA-256** 去重，35 个摘要全不相同（CSV 第 4 列列名沿用 `md5`，实际值为 SHA-256）
 - 特征库：`data/features.json`（JSON，版本 1，512 维，L2 归一化；原子写入，重启不丢）
 
 ## 文档与交付物
