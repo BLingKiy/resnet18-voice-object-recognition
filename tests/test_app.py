@@ -19,6 +19,7 @@ from PIL import Image
 import app
 from core.library import FeatureLibrary, load_library
 from core.recognize import Match, Recognition
+from voice import AsrAudioError, AsrDependencyError, AsrNotConfigured, BaiduAsrError
 
 # 三种注册颜色都映射到同一类，用来模拟"同一物体多张图"。
 MULTI_VIEW_ENCODER = color_encoder(
@@ -186,3 +187,177 @@ def test_build_demo_constructs_ui(
 
     assert isinstance(demo, gr.Blocks)
     assert len(demo.blocks) >= 15
+
+
+# --------------------------------------------------------------------------- #
+# P3 语音录名：界面的降级、回填与键盘路径回归（asr 全部 mock，不联网）
+# --------------------------------------------------------------------------- #
+def _find_button(demo: gr.Blocks, label: str) -> gr.Button:
+    """按显示文案在 Blocks 里找到按钮组件。"""
+    for block in demo.blocks.values():
+        if isinstance(block, gr.Button) and block.value == label:
+            return block
+    raise AssertionError(f"界面里找不到按钮：{label}")
+
+
+def test_asr_button_is_disabled_and_hint_shown_without_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    monkeypatch.setattr(app, "get_library", lambda: library)
+    monkeypatch.setattr(app, "is_asr_configured", lambda: False)
+
+    demo = app.build_demo()
+
+    assert _find_button(demo, "语音识别名称").interactive is False
+    audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
+    assert len(audios) == 1
+    assert "microphone" in audios[0].sources
+    hints = [
+        str(b.value)
+        for b in demo.blocks.values()
+        if isinstance(b, gr.Markdown) and b.value
+    ]
+    assert any("未配置语音识别密钥" in hint and "键盘" in hint for hint in hints)
+
+
+def test_asr_button_is_enabled_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    monkeypatch.setattr(app, "get_library", lambda: library)
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+
+    demo = app.build_demo()
+
+    assert _find_button(demo, "语音识别名称").interactive is True
+    hints = [
+        str(b.value)
+        for b in demo.blocks.values()
+        if isinstance(b, gr.Markdown) and b.value
+    ]
+    assert any("语音识别名称" in hint for hint in hints)
+
+
+def test_voice_click_without_keys_keeps_name_and_never_calls_asr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def fake_asr(path: object) -> str:
+        calls.append(path)
+        return "鼠标。"
+
+    monkeypatch.setattr(app, "is_asr_configured", lambda: False)
+    monkeypatch.setattr(app, "asr", fake_asr)
+
+    name, status, button = app.transcribe_name("record.wav", "苹果")
+
+    # 降级分支：不覆盖已输入名称、不调用 asr、按钮更新为置灰。
+    assert name == "苹果"
+    assert "未配置语音识别密钥" in status and "键盘" in status
+    assert button["interactive"] is False
+    assert calls == []
+
+
+def test_voice_click_fills_recognized_text_into_name_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_asr(path: object) -> str:
+        seen["path"] = path
+        return "  鼠标。 "
+
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", fake_asr)
+
+    name, status, button = app.transcribe_name("record.wav", "苹果")
+
+    assert name == "鼠标。"  # 首尾空白被去掉，用户可以继续编辑
+    assert "已识别为「鼠标。」" in status
+    assert button["interactive"] is True
+    assert seen["path"] == "record.wav"
+
+
+def test_voice_click_without_recording_does_not_call_asr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", lambda path: pytest.fail("没有录音时不应调用 asr"))
+
+    name, status, _ = app.transcribe_name(None, "苹果")
+
+    assert name == "苹果"
+    assert "请先" in status
+
+
+def test_late_asr_not_configured_falls_back_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动后 Key 被移走：is_asr_configured 仍为 True，但 asr 抛未配置异常。"""
+
+    def boom(path: object) -> str:
+        raise AsrNotConfigured("Key 在运行期被移除")
+
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", boom)
+
+    name, status, button = app.transcribe_name("record.wav", "苹果")
+
+    assert name == "苹果"
+    assert "未配置语音识别密钥" in status
+    assert button["interactive"] is False
+
+
+@pytest.mark.parametrize("error_cls", [AsrDependencyError, AsrAudioError, BaiduAsrError])
+def test_other_asr_errors_become_ui_messages(
+    error_cls: type[Exception], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(path: object) -> str:
+        raise error_cls("模拟错误")
+
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", boom)
+
+    name, status, button = app.transcribe_name("record.wav", "苹果")
+
+    assert name == "苹果"  # 失败不清空键盘输入
+    assert "模拟错误" in status
+    assert button["interactive"] is True
+
+
+def test_silent_recognition_keeps_typed_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", lambda path: "   ")
+
+    name, status, _ = app.transcribe_name("record.wav", "苹果")
+
+    assert name == "苹果"
+    assert "没有听清" in status
+
+
+def test_recognized_name_can_be_enrolled_through_keyboard_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """语音回填名称 -> 用户确认 -> 原有 enroll_images 入库，条数按张数增加。"""
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "asr", lambda path: "鼠标。")
+
+    name, _, _ = app.transcribe_name("record.wav", "")
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    files = [
+        _save_solid(tmp_path / "mouse_1.png", RED),
+        _save_solid(tmp_path / "mouse_2.png", GREEN),
+    ]
+
+    status, rows, _ = app.enroll_images(
+        name, files, library=library, encoder=MULTI_VIEW_ENCODER
+    )
+
+    assert "已录入" in status and "2" in status
+    assert rows[0][0] == "鼠标。"
+    assert rows[0][1] == "2"
+    assert load_library(library.path).get("鼠标。") is not None

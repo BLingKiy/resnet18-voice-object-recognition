@@ -1,10 +1,13 @@
-"""ResNet18 + 语音物体识别 Demo 的 Gradio 界面（P2：键盘录入 + 静态识别）。
+"""ResNet18 + 语音物体识别 Demo 的 Gradio 界面（P2 界面 + P3 语音录名接线）。
 
 本文件只做两件事：**界面布局**与**事件绑定**。所有视觉逻辑都复用 ``core``：
 
 - ``core.features``  —— ResNet18 特征提取（512 维、L2 归一化）
 - ``core.library``   —— JSON 特征库的加载、录入、保存
 - ``core.recognize`` —— 余弦相似度检索与未知物体判定
+
+语音只负责"说出物体名称 -> 回填名称框"，识别与相似度逻辑完全不动；
+没有配置百度密钥时按钮置灰，键盘录入路径保持原样可用。
 
 启动::
 
@@ -66,6 +69,15 @@ from core import (
     to_pil,
 )
 from core.library import DEFAULT_LIBRARY_PATH
+from voice import (
+    AsrAudioError,
+    AsrDependencyError,
+    AsrError,
+    AsrNotConfigured,
+    BaiduAsrError,
+    asr,
+    is_asr_configured,
+)
 
 _LOGGER = logging.getLogger("rn18.app")
 
@@ -82,6 +94,13 @@ if not LIBRARY_PATH.is_absolute():
 
 LIBRARY_HEADERS = ["物体名称", "特征条数", "首张注册图", "录入时间"]
 NEIGHBOR_HEADERS = ["排名", "物体", "相似度", "相似度%", "最近注册图"]
+
+# 语音降级的文案只写一份：启动时按钮提示和点击后的状态提示必须口径一致，
+# 否则现场很容易出现"按钮说没配 Key、点下去又说网络错误"的自相矛盾。
+ASR_MISSING_HINT = "未配置语音识别密钥，请用键盘输入"
+ASR_READY_HINT = (
+    "录音后点「语音识别名称」，识别结果会回填到上方名称框，确认或修改后再录入。"
+)
 
 # 常见中文字体；找不到时退回 PIL 默认字体（英文/数字仍可读，中文可能显示方框）。
 _FONT_CANDIDATES = (
@@ -171,6 +190,113 @@ def _file_paths(files: Sequence[Any] | str | Path | None) -> list[Path]:
         elif hasattr(item, "name"):
             paths.append(Path(str(item.name)))
     return paths
+
+
+def _asr_button_update(configured: bool) -> dict[str, Any]:
+    """构造「语音识别名称」按钮的组件更新。
+
+    Gradio 4 允许事件返回普通 ``dict`` 作为组件更新，等价于
+    ``gr.update(...)``；用 dict 是为了让界面事件能脱离 Gradio 单测。
+
+    Args:
+        configured: 当前是否具备可用的 ASR 配置。
+
+    Returns:
+        ``{"interactive": configured}``。
+    """
+    return {"interactive": configured}
+
+
+def transcribe_name(
+    audio_path: str | Path | None,
+    current_name: str = "",
+) -> tuple[str, str, dict[str, Any]]:
+    """Tab1 事件：把麦克风录音识别成物体名称并回填输入框。
+
+    设计成"名称框进、名称框出"而不是返回 ``gr.update``：失败时把用户
+    已经输入的名称原样返回，避免一次识别失败就把键盘输入的内容清空。
+
+    未配置密钥时只走降级分支，绝不调用 :func:`voice.asr`，因此不会联网、
+    不会抛异常；键盘录入路径完全不受影响。
+
+    Args:
+        audio_path: ``gr.Audio(type="filepath")`` 给出的录音文件路径；
+            未录音时为 ``None``。
+        current_name: 名称框当前内容，失败时原样保留。
+
+    Returns:
+        ``(名称框内容, 状态 Markdown, 语音按钮更新)``。识别成功时名称框
+        是识别文本，失败时保持 ``current_name`` 不变。
+    """
+    keep_name = "" if current_name is None else str(current_name)
+
+    if not is_asr_configured():
+        return keep_name, f"⚠️ {ASR_MISSING_HINT}。", _asr_button_update(False)
+
+    if audio_path is None:
+        return (
+            keep_name,
+            "⚠️ 请先点击录音按钮说一遍物体名称，再点「语音识别名称」。",
+            _asr_button_update(True),
+        )
+
+    # 只捕获 voice 层定义的异常：它们的信息已经脱敏（不含 Key 与带
+    # client_secret 的 URL），可以直接展示给现场用户。
+    try:
+        text = asr(audio_path)
+    except AsrNotConfigured:
+        # 启动后 .env 被移走 / Key 被清空：按同一套降级文案处理。
+        return keep_name, f"⚠️ {ASR_MISSING_HINT}。", _asr_button_update(False)
+    except AsrDependencyError as exc:
+        _LOGGER.warning("语音识别缺少依赖: %s", exc)
+        return (
+            keep_name,
+            f"❌ 语音识别缺少依赖：{exc}  \n（键盘录入仍可用）",
+            _asr_button_update(True),
+        )
+    except AsrAudioError as exc:
+        _LOGGER.warning("录音无法解码: %s", exc)
+        return (
+            keep_name,
+            f"❌ 录音无法使用：{exc}  \n（请重新录音，或改用键盘输入）",
+            _asr_button_update(True),
+        )
+    except BaiduAsrError as exc:
+        _LOGGER.warning("百度语音识别失败: %s", exc)
+        return (
+            keep_name,
+            f"❌ 语音识别失败：{exc}  \n（可改用键盘输入）",
+            _asr_button_update(True),
+        )
+    except AsrError as exc:
+        # 兜底：以后新增的 AsrError 子类也不会冒到 Gradio 变成红色堆栈。
+        _LOGGER.warning("语音识别失败: %s", exc)
+        return (
+            keep_name,
+            f"❌ 语音识别失败：{exc}  \n（可改用键盘输入）",
+            _asr_button_update(True),
+        )
+    except Exception as exc:  # noqa: BLE001 - 界面事件不允许把异常抛给前端
+        _LOGGER.exception("语音识别出现未预期异常")
+        return (
+            keep_name,
+            f"❌ 语音识别异常：{type(exc).__name__}: {exc}  \n（可改用键盘输入）",
+            _asr_button_update(True),
+        )
+
+    recognized = (text or "").strip()
+    if not recognized:
+        return (
+            keep_name,
+            "⚠️ 没有听清，请靠近麦克风重说一次，或直接用键盘输入。",
+            _asr_button_update(True),
+        )
+
+    return (
+        recognized,
+        f"✅ 已识别为「{recognized}」，确认或修改后点「录入并保存」。",
+        _asr_button_update(True),
+    )
 
 
 def enroll_images(
@@ -384,6 +510,10 @@ def recognize_image(
 def build_demo() -> gr.Blocks:
     """构建 Gradio Blocks 界面（不启动服务，便于测试与复用）。"""
     library = get_library()
+    # 只读 .env / 环境变量判断配置，不发任何网络请求：百度 token 接口
+    # 在教室网络下可能很慢，绝不能拖住启动。
+    asr_configured = is_asr_configured()
+    _LOGGER.info("语音识别配置：%s", "已就绪" if asr_configured else "缺失（按钮置灰）")
 
     with gr.Blocks(title="ResNet18 物体识别 Demo") as demo:
         gr.Markdown(
@@ -396,9 +526,24 @@ def build_demo() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     name_input = gr.Textbox(
-                        label="物体名称（键盘输入）",
+                        label="物体名称（键盘输入或语音识别回填）",
                         placeholder="例如：苹果",
                         max_lines=1,
+                    )
+                    audio_input = gr.Audio(
+                        label="语音说出物体名称（麦克风录音）",
+                        sources=["microphone"],
+                        type="filepath",
+                        format="wav",
+                    )
+                    asr_button = gr.Button(
+                        "语音识别名称",
+                        interactive=asr_configured,
+                    )
+                    asr_status = gr.Markdown(
+                        ASR_READY_HINT
+                        if asr_configured
+                        else f"⚠️ {ASR_MISSING_HINT}。"
                     )
                     file_input = gr.File(
                         label="注册图片（可多选，建议同一物体 5 张以上）",
@@ -422,6 +567,13 @@ def build_demo() -> gr.Blocks:
                         label="特征库（每个物体的特征条数）",
                     )
 
+            # 语音只负责"把说出的名称回填到文本框"，入库仍走 enroll_images；
+            # 未配置时按钮在启动阶段就被置灰，事件里还有一层同样的降级判断。
+            asr_button.click(
+                transcribe_name,
+                inputs=[audio_input, name_input],
+                outputs=[name_input, asr_status, asr_button],
+            )
             enroll_button.click(
                 enroll_images,
                 inputs=[name_input, file_input],
