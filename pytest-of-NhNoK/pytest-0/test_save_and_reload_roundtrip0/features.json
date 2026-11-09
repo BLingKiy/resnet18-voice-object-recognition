@@ -1,0 +1,69 @@
+{
+  "schema": "hifox-resnet18-feature-library",
+  "version": 1,
+  "model": "resnet18-imagenet1k-v1",
+  "dim": 8,
+  "normalized": true,
+  "threshold": 0.62,
+  "created_at": "2026-11-09T05:46:20Z",
+  "updated_at": "2026-11-09T05:46:20Z",
+  "objects": [
+    {
+      "name": "苹果",
+      "created_at": "2026-11-09T05:46:20Z",
+      "entries": [
+        {
+          "image": "苹果_001",
+          "digest": "6edbbd559916f854f62f6046f525f2b9b80c3389d233ea55b13e7bba72d4cfd4",
+          "added_at": "2026-11-09T05:46:20Z",
+          "vector": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "image": "苹果_002",
+          "digest": "b967b7d6ce320ec3eb1311562bb7d02b4eb6e680724e7b4b35432f5067af3083",
+          "added_at": "2026-11-09T05:46:20Z",
+          "vector": [
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "香蕉",
+      "created_at": "2026-11-09T05:46:20Z",
+      "entries": [
+        {
+          "image": "香蕉_001",
+          "digest": "f6403ded5f751891fef6d719fb6002689c0a89627c82b153e19d3afb8a37fead",
+          "added_at": "2026-11-09T05:46:20Z",
+          "vector": [
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ]
+    }
+  ]
+}
