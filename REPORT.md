@@ -64,7 +64,7 @@ flowchart LR
     H --> I
 ```
 
-- **背景学习**：进实时页先收 20 帧，丢前 2 帧（黑帧/过曝），对剩余帧逐维取中位数并 L2 归一化；写入独立的 `data/background.json`，schema 为 `rn18-background`。背景不写入 `library.json`，不计入物体数量，不进入 P6b 校准集。
+- **背景学习**：进实时页先收 20 帧，丢前 2 帧（黑帧/过曝），对剩余帧逐维取中位数并 L2 归一化；写入独立的 `data/background.json`，schema 为 `rn18-background`。背景不写入 `library.json`，不计入物体数量，不进入 P6b 校准集。Gradio 4.44 没有 tab 切换事件，学习由实时页的**第一帧**触发；没开摄像头/没播放帧序列时不会空转。
 - **背景门**：每帧先算与背景向量的余弦，`>= T_bg` 时直接返回「画面中没有可识别物体」，不检索、不产生播报文本；界面统计行显示「背景已建立」与 T_rt/T_bg。可点「重新学背景」重来，也可关掉背景门退回 rc1 对照。
 - **中心裁剪第二路**：PIL 裁 `0.2~0.8` 的中心 60%，只有「裁剪分 > 全帧分 + `crop_margin`」且「裁剪分 >= T_rt」才采用，`StreamResult.used_crop` 明确标记。
 - **阈值分离**：`threshold_static`（库里的 0.8124，不动）、`threshold_realtime`、`threshold_bg` 三个键写在 `data/realtime.json`。**T_rt 与 T_bg 尚未真机校准**：T_rt 暂等于 T_static，T_bg=0.90 是保守初值；两处都标注「待真机校准」，不由代码编造结论。

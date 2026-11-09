@@ -749,15 +749,25 @@ def _read_rgb(capture: Any) -> Any | None:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
-def _capture_for(capture: Any, seconds: float, *, every: float = 0.3) -> list[Any]:
-    """在 ``seconds`` 秒内按 ``every`` 间隔抓 RGB 帧。"""
+def _capture_for(
+    capture: Any,
+    seconds: float,
+    *,
+    every: float = 0.3,
+    label: str = "",
+) -> list[Any]:
+    """在 ``seconds`` 秒内按 ``every`` 间隔抓 RGB 帧，可选打印采集进度。"""
     frames: list[Any] = []
     deadline = time.monotonic() + max(0.0, float(seconds))
     while time.monotonic() < deadline:
         frame = _read_rgb(capture)
         if frame is not None:
             frames.append(frame)
+            if label and len(frames) % 10 == 0:
+                print(f"\r  {label}：已采集 {len(frames)} 帧", end="", flush=True)
         time.sleep(every)
+    if label:
+        print(f"\r  {label}：采集完成 {len(frames)} 帧" + " " * 8)
     return frames
 
 
@@ -794,7 +804,7 @@ def cmd_camera(args: argparse.Namespace) -> int:
     capture = _open_camera(args.camera)
     try:
         print(f"[1/2] 空场景：请让画面对准空场景，保持 {bg_seconds:.0f} 秒……")
-        bg_frames = _capture_for(capture, bg_seconds)
+        bg_frames = _capture_for(capture, bg_seconds, label="空场景")
         if len(bg_frames) <= args.drop_first:
             raise RuntimeError("空场景采到的帧太少，无法学背景；请延长 --seconds。")
 
@@ -803,10 +813,10 @@ def cmd_camera(args: argparse.Namespace) -> int:
         unknown_frames: dict[str, list[Any]] = {}
         for name in known_names:
             print(f"  请把「{name}」放入画面并保持……")
-            known_frames[name] = _capture_for(capture, per_slot)
+            known_frames[name] = _capture_for(capture, per_slot, label=name)
         for name in unknown_names:
             print(f"  请把未录入物体「{name}」放入画面并保持……")
-            unknown_frames[name] = _capture_for(capture, per_slot)
+            unknown_frames[name] = _capture_for(capture, per_slot, label=name)
     finally:
         capture.release()
 
