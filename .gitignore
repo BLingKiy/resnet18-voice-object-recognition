@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.pytest-tmp*/
+.ruff_cache/
+torchinductor_*/
+
+# 本地验证产物（不随源码提交）
+.tools/
+.torch-cache/
+.validation/
+acl-recovery/
+
+# 原子写入的残留临时文件
+*.tmp
