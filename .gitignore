@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 .pytest_cache/
 .pytest-tmp*/
 pytest-cache-files-*/
@@ -13,6 +14,11 @@ torchinductor_*/
 .torch-cache/
 .validation/
 acl-recovery/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
 
 # 原子写入的残留临时文件
 *.tmp
