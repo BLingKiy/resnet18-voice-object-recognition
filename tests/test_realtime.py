@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from helpers import DIM, color_encoder, one_hot, solid
 
 import app
 from core.library import FeatureLibrary, load_library
+from core.pipeline import BACKGROUND_LABEL
+from core.realtime_config import RealtimeConfig
 from voice import SpeechGate, TtsSynthesisError
 
 APPLE = (220, 40, 40)
@@ -97,6 +100,46 @@ def make_controller(
         gate=gate,
         clock=fake_clock,
     )
+
+
+def make_background_controller(
+    library: FeatureLibrary,
+    tmp_path: Path,
+    *,
+    clock: FakeClock | None = None,
+    learn_frames: int = 12,
+    drop_first: int = 2,
+    gate_enabled: bool = True,
+) -> app.RealtimeController:
+    """构造带背景学习的控制器：背景文件放 tmp，阈值显式注入。"""
+    fake_clock = clock or FakeClock()
+    return app.RealtimeController(
+        library,
+        encoder=TEACH_ENCODER,
+        gate=SpeechGate(4.0, clock=fake_clock),
+        clock=fake_clock,
+        background_path=tmp_path / "background.json",
+        config=RealtimeConfig(
+            threshold_static=0.6,
+            threshold_realtime=0.6,
+            threshold_bg=0.9,
+            bg_crop_margin=0.05,
+            bg_gate_enabled=gate_enabled,
+        ),
+        learn_frames=learn_frames,
+        drop_first=drop_first,
+    )
+
+
+def _learn_background(
+    controller: app.RealtimeController,
+    color: tuple[int, int, int] = APPLE,
+) -> None:
+    """喂够 learn_frames 帧，让控制器学完背景（前 drop_first 帧只做预热）。"""
+    needed = controller.learn_frames
+    for _ in range(needed):
+        controller.process(solid(color))
+    assert controller.background_ready is True
 
 
 def _fake_speaker(spoken: list[str], tmp_path: Path):
@@ -644,3 +687,143 @@ def test_build_demo_has_realtime_tab_and_teaching_controls(
     microphones = [b for b in audios if not getattr(b, "autoplay", False)]
     assert len(playback) == 2
     assert len(microphones) == 2
+
+
+# --------------------------------------------------------------------------- #
+# P5.1 背景自适应
+# --------------------------------------------------------------------------- #
+def test_background_learning_collects_frames_and_persists(
+    library: FeatureLibrary, tmp_path: Path
+) -> None:
+    controller = make_background_controller(library, tmp_path)
+
+    first = controller.process(solid(APPLE))
+    assert controller.background_ready is False
+    assert "正在学习背景" in first.headline
+    assert first.frame is not None  # 学习期间仍显示原始画面
+    assert "背景学习中" in first.stats
+
+    _learn_background(controller, APPLE)
+
+    assert controller.background is not None
+    assert (
+        controller.background.sample_count
+        == controller.learn_frames - controller.drop_first
+    )
+    assert "背景已建立" in controller.stats_text()
+
+    saved_raw = json.loads(
+        (tmp_path / "background.json").read_text(encoding="utf-8")
+    )
+    assert saved_raw["dim"] == DIM  # 假编码器是 8 维，生产链路是 512
+    assert saved_raw["sample_count"] == (
+        controller.learn_frames - controller.drop_first
+    )
+    assert "objects" not in saved_raw
+    # 背景文件绝不能混进物体库。
+    assert library.object_count == 1 and library.total_vectors == 1
+
+
+def test_background_gate_hit_does_not_retrieve_or_speak(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spoken: list[str] = []
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker(spoken, tmp_path))
+    controller = make_background_controller(library, tmp_path)
+    _learn_background(controller, APPLE)
+
+    outcome = controller.process(solid(APPLE))
+
+    assert outcome.is_background is True
+    assert outcome.frame is not None
+    assert BACKGROUND_LABEL in outcome.headline
+    assert "不进入物体检索" in outcome.headline
+    assert outcome.gate_spoken is False and spoken == []
+    assert controller.last_result is not None
+    assert controller.last_result.name == BACKGROUND_LABEL
+    assert controller.last_stream is not None
+    assert controller.last_stream.speech == ""
+    assert controller.last_stream.bg_similarity == pytest.approx(1.0, abs=1e-6)
+    assert "T_rt" in outcome.stats and "T_bg" in outcome.stats
+
+
+def test_gate_switch_off_returns_to_rc1_behavior(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spoken: list[str] = []
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker(spoken, tmp_path))
+    controller = make_background_controller(library, tmp_path)
+    _learn_background(controller, APPLE)
+
+    headline, stats = controller.set_gate_enabled(False)
+    assert "背景门已关闭" in headline
+    assert "背景门 **关**" in stats
+
+    outcome = controller.process(solid(APPLE))
+
+    assert outcome.is_background is False
+    assert "识别结果：苹果" in outcome.headline
+    assert outcome.gate_spoken is True and spoken == ["识别结果：苹果"]
+    assert controller.last_stream is not None
+    assert controller.last_stream.bg_similarity is None
+
+
+def test_relearn_background_resets_and_rebuilds(
+    library: FeatureLibrary, tmp_path: Path
+) -> None:
+    controller = make_background_controller(library, tmp_path)
+    _learn_background(controller, APPLE)
+    assert controller.background_ready is True
+
+    headline, stats = controller.relearn_background()
+
+    assert "重新学习背景" in headline
+    assert controller.background is None
+    assert controller.background_learning is True
+    assert "背景学习中" in stats
+
+    _learn_background(controller, APPLE)
+    assert controller.background_ready is True
+
+
+def test_teaching_still_works_after_background_is_learned(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker([], tmp_path))
+    clock = FakeClock()
+    controller = make_background_controller(library, tmp_path, clock=clock)
+    _learn_background(controller, APPLE)
+
+    ok, _ = controller.begin_teaching(solid(APPLE))
+    assert ok is True
+    _capture_five(controller, clock)
+    status, _ = controller.commit_teaching("鼠标")
+
+    assert "已入库「鼠标」" in status
+    assert controller.teaching is False
+    # 已经学好的背景不被教学流程清掉。
+    assert controller.background is not None
+    assert controller.background_learning is False
+
+
+def test_build_demo_has_relearn_button_and_gate_checkbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    controller = make_background_controller(library, tmp_path)
+    monkeypatch.setattr(app, "get_library", lambda: library)
+    monkeypatch.setattr(app, "is_asr_configured", lambda: True)
+    monkeypatch.setattr(app, "get_realtime", lambda library=None: controller)
+
+    demo = app.build_demo()
+    buttons = {
+        block.value
+        for block in demo.blocks.values()
+        if isinstance(block, gr.Button)
+    }
+    assert "重新学背景（对准空场景）" in buttons
+
+    checkboxes = [
+        block for block in demo.blocks.values() if isinstance(block, gr.Checkbox)
+    ]
+    assert any("背景门" in (box.label or "") for box in checkboxes)

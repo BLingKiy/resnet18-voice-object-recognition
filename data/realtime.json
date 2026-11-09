@@ -1,0 +1,9 @@
+{
+  "schema": "rn18-realtime-config",
+  "version": 1,
+  "threshold_static": 0.8124,
+  "threshold_realtime": 0.75,
+  "threshold_bg": 0.9,
+  "bg_crop_margin": 0.05,
+  "bg_gate_enabled": true
+}

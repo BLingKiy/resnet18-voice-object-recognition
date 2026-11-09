@@ -31,6 +31,7 @@ acl-recovery/
 # 用 data/* 而不是 data/：父目录被整体忽略后，!data/manifest.csv 无法再放行。
 data/*
 !data/manifest.csv
+!data/realtime.json
 
 # pytest 自定义 --basetemp 产物
 pytest-of-*/

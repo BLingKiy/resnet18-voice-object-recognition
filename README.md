@@ -96,17 +96,18 @@ python tools/calibrate.py --library ~/.rn18/data/features.json --known-dir ~/.rn
 ### 测试
 
 ```bash
-python -m pytest tests -q                      # 142 passed, 4 skipped
-RUN_RESNET_TESTS=1 python -m pytest tests -q   # 145 passed, 1 skipped（含真实权重端到端）
+python -m pytest tests -q                      # 178 passed, 4 skipped（P5.1 实现后）
+RUN_RESNET_TESTS=1 python -m pytest tests -q   # 含真实权重端到端
 ```
 
-默认跳过 4 项：3 项真实 ResNet 端到端（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 合成（需联网 + `RN18_TTS_LIVE=1`）。唯一必须联网的 TTS 用例在无网环境不跑，不会伪造结果。
+默认跳过 4 项：3 项真实 ResNet 端到端（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 合成（需联网 + `RN18_TTS_LIVE=1`）。必须联网的 TTS 用例在无网环境不跑，不会伪造结果。
 
 ### 图形界面
 
 - **Tab1 · 多图录入**：输入物体名称（键盘或语音回填）→ 上传该物体的多张图片 → 点「录入并保存」。重复图片按像素摘要去重，不会虚增向量条数。
 - **Tab2 · 单图识别**：上传一张测试图 → 点「开始识别」。页面显示物体名、相似度（含百分比）、是否未知，以及前 3 个近邻和标注图（绿框=已知，红框=未知）；识别成功后自动播报当次结果。
 - **Tab3 · 实时识别（加分项）**：打开摄像头后画面按约 0.3 s/帧送入 `recognize_stream`，实时叠加名称与相似度，未知显示「未知物体」；TTS 按「结果变化 + 4 s 冷却」播报。没有摄像头时可上传预置帧序列模拟视频流。
+- **Tab3 · 背景自适应（P5.1）**：首次进入实时页先收集 **20** 帧（其中前 **2** 帧只做预热）建立当前机位背景，统计行显示学习进度与「背景已建立」；之后每帧先过背景门，命中显示「画面中没有可识别物体（背景）」，不检索、不播报。可点「重新学背景」重来，也可关掉「背景门」退回旧单路行为做对照。背景只写 `data/background.json`，不进入物体库。用预置帧序列做**实时识别**时请至少准备 20 张；「用帧序列抓 5 帧」教学入口走自己的预热逻辑，不受这 20 张限制。
 - **Tab3 · 教学式录入**：点「教它」→ 先丢 2 帧预热 → 按 0.2 s 以上间隔抓 5 帧 → 录音说名称 → ASR 回填（可键盘修改）→ 确认入库。入库复用 `add_to_library` / `save_library`，重启后仍在；教学期间识别与 TTS 同时暂停，退出时清空冷却计时。
 - **刷新特征库**：从磁盘重新读取 `data/features.json`，用于验证"重启后特征库仍在"。
 
@@ -140,6 +141,8 @@ BAIDU_ASR_DEV_PID=1537
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `RN18_LIBRARY_PATH` | `data/features.json` | 特征库 JSON 路径 |
+| `RN18_BACKGROUND_PATH` | `data/background.json` | 实时背景向量 JSON 路径（与特征库分开） |
+| `RN18_REALTIME_CONFIG` | `data/realtime.json` | 实时三阈值配置路径 |
 | `RN18_HOST` | `127.0.0.1` | 监听地址（演示只给本机） |
 | `RN18_PORT` | `7860` | 监听端口 |
 
@@ -177,6 +180,71 @@ python tools/unknown_check.py --library ~/.rn18/data/features.json --dir ~/.rn18
 
 > **校准集纪律**：校准只能用 `test/` 与 `unknown/`，注册图（`known/`）绝不允许进校准集，否则阈值会自己污染自己。本次三类样本 md5 两两零重叠。
 
+## 背景自适应（P5.1，实时链路）
+
+实时画面里物体通常只占一部分，整帧特征会被背景稀释。这里加一层**背景门**和**中心裁剪第二路**，但不引入目标检测/分割模型，也不接在线服务：
+
+```mermaid
+flowchart LR
+    A[实时帧] --> B[ResNet18 512 维特征]
+    B --> C{与背景向量余弦 > T_bg?}
+    C -->|是| D[画面中没有可识别物体<br/>不检索 / 不播报]
+    C -->|否| E[全帧检索 + 中心 60% 裁剪检索]
+    E --> F{裁剪分 - 全帧分 > bg_crop_margin?}
+    F -->|是| G[采用裁剪结果 source=crop]
+    F -->|否| H[采用全帧结果 source=full]
+    G --> I[用 T_rt 判未知 + 标注 + 播报]
+    H --> I
+```
+
+- 背景学习：进实时页后收集 20 帧，丢前 2 帧（黑帧/过曝），对剩余 18 帧逐维取**中位数**再 L2 归一化；写入 `data/background.json`，**绝不写进 `library.json`**。丢弃预热帧后不足 10 帧时直接报错，不拿半截数据凑。
+- 背景门：每帧先算与背景的余弦；`bg_sim > T_bg` 判为「画面中没有可识别物体」，直接返回 `state="no_object"`，不进入检索、不产生播报文本。
+- 中心裁剪：PIL 裁 `0.2~0.8` 的中心 60%，只有「裁剪分 - 全帧分 > `bg_crop_margin`」才采用；结果里用 `source=full|crop` 标记。
+- 实时阈值：用 `T_rt` 判未知，**不套用静态阈值 0.8124**；静态链路完全不变。
+- 关闭开关：`realtime.json` 的 `bg_gate_enabled=false`（或界面「背景门」复选框）时，`recognize_stream` 退回 P5.1 之前的单路识别（全帧 + 库内静态阈值），标注图字节不变，便于现场对照。
+
+三个阈值分开存，静态阈值仍以特征库为准：
+
+| 键 | 当前值 | 来源 / 状态 |
+|----|--------|-------------|
+| `threshold_static` | **0.8124** | P6b 用未参与录入的测试图校准，写进 `features.json`；**保持不变** |
+| `threshold_realtime` | **0.75（占位）** | **待真机校准**：实时帧物体占比小、分数整体偏低，0.75 只是低于静态阈值的保守占位；**没有把 0.8124 搬过来** |
+| `threshold_bg` | **0.90（占位）** | **待真机校准**：空场景/物体帧分布确定前，先用高阈值避免把物体误门掉 |
+| `bg_crop_margin` | **0.05（占位）** | **待真机校准**：裁剪结果至少比全帧高 0.05 才采用 |
+| `bg_gate_enabled` | **true** | 背景门开关；`false` 退回旧单路，便于对照 |
+
+配置文件 `data/realtime.json`（与 `library.json` 并列）：
+
+```json
+{
+  "schema": "rn18-realtime-config",
+  "version": 1,
+  "threshold_static": 0.8124,
+  "threshold_realtime": 0.75,
+  "threshold_bg": 0.9,
+  "bg_crop_margin": 0.05,
+  "bg_gate_enabled": true
+}
+```
+
+> 注意：`threshold_static` 即使写在文件里，程序读配置时仍会用 `features.json` 的 `threshold` 覆盖它，避免两处数字打架。`threshold_realtime` / `threshold_bg` / `bg_crop_margin` 当前值**不是校准结论**，报告里必须保留「待真机校准」标注。
+
+真机自检（一条命令给出背景基线、空场景最大误报分、物体分数分布与阈值是否合理）：
+
+```bash
+# 离线帧：frames/background/*.jpg + frames/<物体名>/*.jpg + frames/unknown/<物体名>/*.jpg
+python tools/realtime_check.py --frames ~/.rn18/data/realtime_frames \
+    --library ~/.rn18/data/features.json
+
+# 摄像头：前 1/3 时间空场景，之后按库里的物体顺序逐个放入
+python tools/realtime_check.py --camera 0 --seconds 30 \
+    --library ~/.rn18/data/features.json
+```
+
+输出包含：空场景 `bg_sim` 的 min/median/max、空场景最高候选分与超过 `T_rt` 的误报次数、每个物体在场时的分数 min/median/max、当前三个阈值以及 `T_bg`/`T_rt` 是否可分的判定。
+
+`--camera` 模式需要 `pip install opencv-python`（**仅自检脚本**需要，应用本身不依赖 opencv；没有摄像头/没装 opencv 时脚本会给出明确报错并建议改用 `--frames`，不会静默卡住）。`--write` 只写 `data/realtime.json`，不动 `library.json`；两分布重叠时脚本**不给数字**，直接要求重拍，避免把拍脑袋的值写进配置。
+
 ## 数据与特征库格式
 
 - 注册图：`~/.rn18/data/known/<物体名>/*.jpg`（每物体 5 张；`power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
@@ -185,6 +253,8 @@ python tools/unknown_check.py --library ~/.rn18/data/features.json --dir ~/.rn18
 - 规模：5 物体 × 7 张（5 注册 + 2 测试）= 35 张，另加 3 类未知 × 2 张 = 6 张，合计 41 张
 - 清单：`data/manifest.csv` 是**唯一入库清单**，35 行 = 25 张 known + 10 张 test，按**文件字节 SHA-256** 去重，35 个摘要全不相同（CSV 第 4 列列名沿用 `md5`，实际值为 SHA-256）
 - 特征库：JSON，版本 1，512 维，L2 归一化，25 条向量，约 300 KB；原子写入，重启不丢
+- 实时背景：`data/background.json`，独立 schema `rn18-background`，只存 512 维背景向量；删掉它只会让实时页重新学背景，不影响物体库
+- 实时配置：`data/realtime.json`，存 `threshold_static` / `threshold_realtime` / `threshold_bg` / `bg_crop_margin` / `bg_gate_enabled`；`threshold_static` 的真值仍以 `features.json` 为准
 
 ## 文档与交付物
 
