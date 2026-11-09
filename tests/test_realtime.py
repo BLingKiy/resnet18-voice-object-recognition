@@ -37,8 +37,12 @@ WHITE = (250, 250, 250)
 BLACK = (5, 5, 5)
 CYAN = (0, 255, 255)
 ORANGE = (255, 140, 0)
+PINK = (255, 105, 180)
+GRAY = (128, 128, 128)
+TEAL = (0, 128, 128)
 
-# 教学帧：5 种不同颜色 -> 同一个新物体向量，模拟同一物体的 5 个视角。
+# 教学帧：不同颜色 -> 同一个新物体向量，模拟同一物体的多个视角。
+# 颜色必须互不相同，否则 FeatureLibrary 会按像素摘要去重，凑不满 5 条。
 TEACH_ENCODER = color_encoder(
     {
         APPLE: one_hot(0),
@@ -49,6 +53,9 @@ TEACH_ENCODER = color_encoder(
         CYAN: one_hot(4),
         ORANGE: one_hot(4),
         BLACK: one_hot(4),
+        PINK: one_hot(4),
+        GRAY: one_hot(4),
+        TEAL: one_hot(4),
     }
 )
 
@@ -107,11 +114,17 @@ def _fake_speaker(spoken: list[str], tmp_path: Path):
 
 
 def _capture_five(controller: app.RealtimeController, clock: FakeClock) -> None:
-    """从当前帧起按 0.25 s 间隔抓满 5 帧。"""
-    for color in (WHITE, CYAN, ORANGE, BLACK):
+    """先丢 1 个预热帧，再按 0.25 s 间隔抓满 5 帧。
+
+    触发教学的当前帧已经算第 1 个预热帧，所以这里再丢 1 帧即可开始计数。
+    颜色必须互不相同且亮度可用，否则会被去重或画质检查跳过。
+    """
+    for color in (WHITE, CYAN, ORANGE, PINK, GRAY, TEAL):
+        if controller.captured_count >= controller.count:
+            break
         clock.advance(0.25)
         controller.offer_frame(solid(color))
-    assert controller.captured_count == 5
+    assert controller.captured_count == controller.count
 
 
 def test_continuous_recognition_overlays_and_throttles_tts(
@@ -176,18 +189,23 @@ def test_teaching_pauses_recognition_and_captures_spaced_frames(
     assert controller.tts_paused is True
     assert controller.audio_path is None  # 待播音频被清空，旧声音不会再响
 
+    # 当前帧只做预热，不计入 5 张注册帧。
+    assert controller.captured_count == 0
+    assert controller._warmup_remaining == 1  # 明确验证预热状态
+
     # 教学态：帧只进抓帧缓冲，不识别、不播报、不覆盖画面。
     clock.advance(0.1)
     paused = controller.process(solid(BANANA))
     assert paused.frame is None and paused.gate_spoken is False
-    assert controller.captured_count == 1  # 间隔不足 0.2 s，这一帧被丢弃
+    assert controller.captured_count == 0  # 这帧仍是第 2 个预热帧，被丢弃
     assert spoken == ["识别结果：苹果"]
 
-    for color in (WHITE, CYAN, ORANGE, BLACK):
+    for color in (WHITE, CYAN, ORANGE, PINK, GRAY):
         clock.advance(0.25)
         controller.process(solid(color))
     assert controller.captured_count == 5
-    assert all(0.2 <= gap <= 0.35 for gap in controller.capture_intervals)
+    # 任务要求 0.2–0.3 s；这里用 0.25 s，且不是 5 个相邻帧。
+    assert all(0.2 <= gap <= 0.3 for gap in controller.capture_intervals)
     assert controller.teaching is True and spoken == ["识别结果：苹果"]
 
 
@@ -281,18 +299,148 @@ def test_cancel_discards_frames_and_never_writes(
 
     controller.begin_teaching(solid(APPLE))
     clock.advance(0.3)
-    controller.offer_frame(solid(WHITE))
+    controller.offer_frame(solid(WHITE))  # 第 2 个预热帧，丢弃
     clock.advance(0.3)
-    controller.offer_frame(solid(CYAN))
-    assert controller.captured_count == 3
+    controller.offer_frame(solid(CYAN))  # 正式第 1 帧
+    clock.advance(0.3)
+    controller.offer_frame(solid(ORANGE))  # 正式第 2 帧
+    assert controller.captured_count == 2
 
     status, _, _ = controller.cancel_teaching()
 
-    assert "已取消教学" in status and "丢弃 3 帧" in status
+    assert "已取消教学" in status and "丢弃 2 帧" in status
     assert controller.teaching is False
     assert library.total_vectors == before_vectors
     assert library.path.read_bytes() == before_bytes
     assert controller.captured_count == 0
+
+
+def test_teaching_discards_warmup_frames_before_capture(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """首帧常黑/过曝：当前帧 + 下一帧必须丢弃，不能算进 5 张注册图。"""
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker([], tmp_path))
+    clock = FakeClock()
+    controller = make_controller(library, clock=clock)
+
+    ok, _ = controller.begin_teaching(solid(APPLE))
+    assert ok is True
+    assert controller.captured_count == 0  # 当前帧只做预热
+
+    clock.advance(0.1)
+    assert controller.offer_frame(solid(WHITE)) is False  # 第 2 个预热帧
+    assert controller.captured_count == 0
+
+    clock.advance(0.25)
+    assert controller.offer_frame(solid(CYAN)) is True  # 第 1 张正式注册帧
+    assert controller.captured_count == 1
+
+
+def test_inflight_tts_completion_is_dropped_during_teaching(
+    library: FeatureLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """教学开始前已在跑的 TTS 不能在教学录音期间把音频写回来（防回声）。"""
+    pending: list[Any] = []
+
+    def deferred_speak(
+        text: str, *, on_success: Any = None, on_error: Any = None, **_: Any
+    ) -> None:
+        pending.append(on_success)
+
+    monkeypatch.setattr(app, "speak_in_background", deferred_speak)
+    controller = make_controller(library)
+    controller.process(solid(APPLE))
+    assert pending and controller.audio_path is None
+
+    controller.begin_teaching(solid(APPLE))
+    assert controller.audio_path is None
+    pending[0](Path("C:/old.mp3"))  # 旧合成此刻才完成
+    assert controller.audio_path is None
+    assert controller.process(solid(WHITE)).audio is None
+
+
+def test_short_capture_commit_keeps_teaching_and_ui_truthful(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """抓帧不足时 commit 必须拒绝，界面不能谎报「已恢复」。"""
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker([], tmp_path))
+    clock = FakeClock()
+    controller = make_controller(library, clock=clock)
+    monkeypatch.setattr(app, "get_realtime", lambda library=None: controller)
+    before = library.total_vectors
+
+    controller.begin_teaching(solid(APPLE))
+    clock.advance(0.3)
+    controller.offer_frame(solid(WHITE))  # 预热丢弃
+    clock.advance(0.3)
+    controller.offer_frame(solid(CYAN))  # 只有 1 张正式帧
+
+    out = app.teaching_confirm("鼠标")
+
+    assert "只抓到 1/5 帧" in out[0]
+    assert controller.teaching is True
+    assert library.total_vectors == before
+    # 名称框/录音保留（gr.update），实时结论不写「已恢复」。
+    assert not isinstance(out[3], str)
+    assert not isinstance(out[5], str)
+
+
+def test_encoder_failure_leaves_library_untouched(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5 帧必须在 extract_features 里全部算完再 append；中途失败不留半条脏数据。"""
+    monkeypatch.setattr(app, "speak_in_background", _fake_speaker([], tmp_path))
+
+    def broken_encoder(images: Any) -> Any:
+        raise RuntimeError("编码器故障")
+
+    clock = FakeClock()
+    controller = app.RealtimeController(
+        library,
+        encoder=broken_encoder,
+        gate=SpeechGate(4.0, clock=clock),
+        clock=clock,
+    )
+    before_vectors = library.total_vectors
+    before_bytes = library.path.read_bytes()
+
+    controller.begin_teaching(solid(APPLE))
+    _capture_five(controller, clock)
+    status, _ = controller.commit_teaching("鼠标")
+
+    assert "入库失败" in status and "编码器故障" in status
+    assert library.total_vectors == before_vectors
+    assert library.path.read_bytes() == before_bytes
+    assert controller.teaching is False
+
+
+def test_sequence_teaching_uses_warmup_then_captures_five(
+    library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无摄像头兜底：7 张序列 = 1 张当前帧 + 1 张预热 + 5 张注册帧。"""
+    colors = (WHITE, CYAN, ORANGE, PINK, GRAY, TEAL, APPLE)
+    paths: list[str] = []
+    for index, color in enumerate(colors):
+        path = tmp_path / f"seq_{index}.png"
+        solid(color, (64, 64)).save(path)
+        paths.append(str(path))
+
+    clock = FakeClock()
+    controller = app.RealtimeController(
+        library,
+        encoder=TEACH_ENCODER,
+        gate=SpeechGate(4.0, clock=clock),
+        clock=clock,
+    )
+    monkeypatch.setattr(app, "get_realtime", lambda library=None: controller)
+    # teach_from_sequence 用 time.sleep 控制 0.3 s 节奏；测试里同步推进假时钟。
+    monkeypatch.setattr(app.time, "sleep", clock.advance)
+
+    outputs = list(app.teach_from_sequence(paths))
+
+    assert outputs and "已进入教学态" in outputs[0][0]
+    assert controller.teaching is True
+    assert controller.captured_count == 5
 
 
 def test_save_failure_rolls_back_in_memory_library(
@@ -411,14 +559,14 @@ def test_ui_event_functions_wire_controller(
     assert controller.teaching is True
     assert started[3] is None  # 清空播报，防回声
 
-    # 教学态下帧回调不刷新画面，但抓帧计数会增长。
+    # 教学态下帧回调不刷新画面；这一帧是第 2 个预热帧，仍不计数。
     clock.advance(0.3)
     paused = app.realtime_frame(solid(WHITE))
     assert len(paused) == 6
     assert not isinstance(paused[0], np.ndarray)
-    assert controller.captured_count == 2
+    assert controller.captured_count == 0
 
-    _capture_five_rest(controller, clock)
+    _capture_five(controller, clock)
     confirmed = app.teaching_confirm("鼠标")
     assert len(confirmed) == 8
     assert "已入库" in confirmed[0]
@@ -431,14 +579,6 @@ def test_ui_event_functions_wire_controller(
     cancelled = app.teaching_cancel()
     assert len(cancelled) == 8
     assert "已取消教学" in cancelled[0]
-
-
-def _capture_five_rest(controller: app.RealtimeController, clock: FakeClock) -> None:
-    """补齐到 5 帧（已有 2 帧时再补 3 帧）。"""
-    for color in (CYAN, ORANGE, BLACK):
-        clock.advance(0.3)
-        assert controller.offer_frame(solid(color)) is True
-    assert controller.captured_count == 5
 
 
 def test_play_frame_sequence_yields_one_frame_per_image(

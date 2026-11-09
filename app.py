@@ -129,11 +129,15 @@ TTS_UNAVAILABLE_HINT = "⚠️ 语音播报不可用，请检查网络"
 # 实时链路参数（任务要求：帧流 0.3–0.5 s；教学帧间隔 0.2–0.3 s；TTS 冷却 3–5 s）。
 REALTIME_STREAM_EVERY = 0.3
 TEACHING_FRAME_COUNT = 5
+# 首帧常为黑帧/过曝：进入教学态后先丢 2 帧，再开始计数，避免把废帧写进库。
+TEACHING_WARMUP_FRAMES = 2
 TEACHING_MIN_GAP = 0.2
 TTS_COOLDOWN_SECONDS = 4.0
 
 REALTIME_IDLE_HINT = "打开摄像头，或上传预置帧序列后点「播放帧序列」。"
-TEACHING_IDLE_HINT = "未开始教学。点「教它」后抓 5 帧，再说出物体名称。"
+TEACHING_IDLE_HINT = (
+    "未开始教学。点「教它」后先丢 2 帧预热，再抓 5 帧，最后说出物体名称。"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -660,7 +664,7 @@ class RealtimeController:
     防回声规则（任务第三节）：
     - :meth:`begin_teaching` 同时置 ``teaching`` / ``recognition_paused`` /
       ``tts_paused``，并清空待播音频；
-    - :meth:`_end_teaching` 恢复三个状态并 ``SpeechGate.reset()``，冷却计时清零，
+    - :meth:`_end_teaching_locked` 恢复三个状态并 ``SpeechGate.reset()``，冷却计时清零，
       不会在教学结束后立刻补播教学期间积压的旧结果。
 
     Args:
@@ -670,6 +674,7 @@ class RealtimeController:
         reloader: 入库写盘失败时重新从磁盘加载库的回调；``None`` 表示不恢复。
         clock: 抓帧间隔使用的时钟，测试可注入假时钟。
         count: 一次教学抓取的帧数，固定 5。
+        warmup: 进入教学态后先丢弃的帧数（含触发时的当前帧），默认 2。
         min_gap: 相邻教学帧的最小间隔（秒），0.2–0.3 之间。
     """
 
@@ -682,11 +687,14 @@ class RealtimeController:
         reloader: Callable[[], FeatureLibrary] | None = None,
         clock: Callable[[], float] = time.monotonic,
         count: int = TEACHING_FRAME_COUNT,
+        warmup: int = TEACHING_WARMUP_FRAMES,
         min_gap: float = TEACHING_MIN_GAP,
         min_interval: float = REALTIME_STREAM_EVERY,
     ) -> None:
         if count < 1:
             raise ValueError("count 必须 >= 1")
+        if warmup < 0:
+            raise ValueError("warmup 不能为负数")
         if min_gap < 0:
             raise ValueError("min_gap 不能为负数")
         if min_interval < 0:
@@ -697,6 +705,7 @@ class RealtimeController:
         self._reloader = reloader
         self._clock = clock
         self.count = int(count)
+        self.warmup = int(warmup)
         self.min_gap = float(min_gap)
         self.min_interval = float(min_interval)
 
@@ -707,10 +716,15 @@ class RealtimeController:
 
         self._capture: list[Image.Image] = []
         self._capture_times: list[float] = []
+        self._warmup_remaining = 0
+        self._capture_warning: str | None = None
         self._last_capture_at = float("-inf")
         self._last_frame: Image.Image | None = None
         self._audio_path: str | None = None
         self._tts_status = REALTIME_IDLE_HINT
+        # 每次进入/退出教学态都递增；后台 TTS 回调只有在代次未变时才允许写回，
+        # 否则旧合成会在教学录音期间把音频路径塞回来，形成回声。
+        self._tts_generation = 0
         self._last_elapsed_ms: float | None = None
         self._last_result: Recognition | None = None
         self._last_recognized_at = float("-inf")
@@ -781,11 +795,21 @@ class RealtimeController:
         )
 
     def teaching_progress(self) -> str:
-        """教学抓帧进度文案。"""
+        """教学抓帧进度文案；预热阶段明确告诉用户还要丢几帧。"""
         with self._lock:
             if not self.teaching:
                 return TEACHING_IDLE_HINT
             done = len(self._capture)
+            warmup_left = self._warmup_remaining
+            warning = self._capture_warning
+
+        if warning:
+            return f"⚠️ {warning} 当前已抓 **{done}/{self.count}** 帧。"
+        if warmup_left > 0:
+            return (
+                f"📸 预热：先丢弃前 **{self.warmup}** 帧（还剩 **{warmup_left}** 帧），"
+                f"之后抓 **{self.count}** 帧。请让物体保持不动。"
+            )
         if done >= self.count:
             return (
                 f"✅ 已抓 **{self.count}/{self.count}** 帧（间隔 ≥ {self.min_gap:.2f} s）。"
@@ -905,7 +929,11 @@ class RealtimeController:
 
     # ------------------------------------------------------------ 教学：抓帧
     def begin_teaching(self, frame: Any = None) -> tuple[bool, str]:
-        """进入教学态：暂停识别与 TTS、清空待播音频、抓下当前帧。
+        """进入教学态：暂停识别与 TTS、清空待播音频，并丢弃当前预热帧。
+
+        当前帧只用来确认"画面可用"，不计入 5 张注册帧：摄像头首帧常为
+        黑帧或过曝，直接入库会把废帧写进特征库。``warmup=2`` 时当前帧
+        算第 1 帧预热，之后再丢 1 帧，然后才开始计数。
 
         Args:
             frame: 当前画面；``None`` 时退回最近一帧（摄像头刚推来的）。
@@ -932,26 +960,64 @@ class RealtimeController:
             self.teaching = True
             self.recognition_paused = True
             self.tts_paused = True
-            self._capture = [pil]
-            self._capture_times = [self._clock()]
-            self._last_capture_at = self._capture_times[0]
+            self._capture = []
+            self._capture_times = []
+            self._warmup_remaining = max(0, self.warmup - 1)
+            self._capture_warning = None
+            now = self._clock()
+            self._last_frame = pil
+            # warmup=0 是测试/特殊情况：当前帧直接作为第 1 张；默认 2 时
+            # 当前帧只做画质预检后丢弃，避免首帧黑屏被写进特征库。
+            if self.warmup <= 0:
+                self._capture = [pil]
+                self._capture_times = [now]
+            self._last_capture_at = now
+            # 代次 +1：教学开始前已经在跑的 TTS 合成，完成后也不许再写回音频。
+            self._tts_generation += 1
             # 清空待播音频：教学态麦克风正在录音，绝不能同时播报旧结果（防回声）。
             self._audio_path = None
             self._tts_status = "⏸ 教学态已暂停语音播报，避免录到播报音。"
             self._gate.reset()
 
+        if self.warmup <= 0:
+            detail = f"开始抓帧（0/{self.count}）。"
+        elif self._warmup_remaining == 0:
+            detail = f"当前帧已作为预热丢弃，开始抓帧（0/{self.count}）。"
+        else:
+            detail = (
+                f"当前帧作为预热丢弃，还需丢弃 {self._warmup_remaining} 帧，"
+                f"随后抓 {self.count} 帧。"
+            )
         return (
             True,
-            f"✅ 已进入教学态：识别与 TTS 已暂停，开始抓帧（1/{self.count}）。",
+            f"✅ 已进入教学态：识别与 TTS 已暂停；{detail}",
         )
 
     def _offer_frame_locked(self, pil: Image.Image) -> bool:
-        """在教学态追加一帧（调用方必须已持有 ``self._lock``）。"""
-        if len(self._capture) >= self.count:
+        """在教学态追加一帧（调用方必须已持有 ``self._lock``）。
+
+        顺序很重要：先消耗预热帧，再检查最小间隔，最后检查画质。
+        预热帧不计数、不入库；画质不合格的帧只跳过并记录提示，也不计数。
+        """
+        if not self.teaching or len(self._capture) >= self.count:
             return False
         now = self._clock()
+        if self._warmup_remaining > 0:
+            self._warmup_remaining -= 1
+            self._last_capture_at = now
+            self._capture_warning = None
+            return False
         if self._capture and now - self._last_capture_at < self.min_gap:
             return False
+
+        problem = _looks_unusable(pil)
+        if problem:
+            # 不把废帧塞进缓冲；把时间戳推到现在，让下一帧仍满足 0.2 s 间隔。
+            self._capture_warning = problem
+            self._last_capture_at = now
+            return False
+
+        self._capture_warning = None
         self._capture.append(pil)
         self._capture_times.append(now)
         self._last_capture_at = now
@@ -964,7 +1030,8 @@ class RealtimeController:
             frame: 一帧画面（numpy / PIL / 路径）。
 
         Returns:
-            ``True`` 表示这次真的收下了（距离上一帧已满 ``min_gap``）。
+            ``True`` 表示这次真的收下了；预热帧、间隔不足或画质不合格
+            都返回 ``False``（但仍会推进内部计时/预热计数）。
         """
         if frame is None:
             return False
@@ -1052,6 +1119,9 @@ class RealtimeController:
 
             try:
                 with _STORE_LOCK:
+                    # add_to_library -> FeatureLibrary.add 会先在 extract_features
+                    # 里把 5 帧全部编码完，再一次性 append；任何一帧编码失败都不会
+                    # 在库里留下半条记录。取消教学则根本不走到这里。
                     result: AddResult = add_to_library(
                         self.library,
                         clean_name,
@@ -1118,8 +1188,12 @@ class RealtimeController:
         self.tts_paused = False
         self._capture.clear()
         self._capture_times.clear()
+        self._warmup_remaining = 0
+        self._capture_warning = None
         self._last_capture_at = float("-inf")
         self._last_recognized_at = float("-inf")
+        # 代次 +1：教学期间/开始前排队的旧合成，退出后也不许补播。
+        self._tts_generation += 1
         self._tts_status = TTS_IDLE_HINT
         # 恢复时清零冷却：教学期间可能暂停了几十秒，不清零会立刻补播旧结果。
         self._gate.reset()
@@ -1139,14 +1213,28 @@ class RealtimeController:
 
         合成放后台线程：0.3 s 一帧的流不能被 1–2 s 的网络合成阻塞。
         """
+        generation = self._tts_generation
+
+        def _still_current() -> bool:
+            """教学态或代次已变时，旧合成结果必须丢弃（防回声）。"""
+            return (
+                generation == self._tts_generation
+                and not self.teaching
+                and not self.tts_paused
+            )
 
         def on_success(path: Path) -> None:
             with self._lock:
+                if not _still_current():
+                    _LOGGER.info("丢弃教学态/过期 TTS 结果: %s", path)
+                    return
                 self._audio_path = str(path)
                 self._tts_status = f"🔊 正在播报：{text}"
 
         def on_error(exc: TtsError) -> None:
             with self._lock:
+                if not _still_current():
+                    return
                 self._tts_status = f"{TTS_UNAVAILABLE_HINT}。  \n（{exc}）"
 
         try:
@@ -1267,7 +1355,7 @@ def play_frame_sequence(
 def teach_from_sequence(
     files: Sequence[Any] | str | Path | None,
 ) -> Iterator[tuple[str, str, str, Any, str, Any]]:
-    """无摄像头兜底：从预置帧序列抓 5 帧进入教学态。
+    """无摄像头兜底：从预置帧序列先丢 2 帧预热，再抓 5 帧进入教学态。
 
     摄像头现场演示应直接点「教它」；本函数只解决"这台机器没有摄像头，
     但需要把教学闭环完整走通"的问题。抓帧间隔同样是 0.3 s，且第 1 帧
@@ -1281,9 +1369,26 @@ def teach_from_sequence(
     """
     controller = get_realtime()
     paths = _file_paths(files)
+    required = controller.count + controller.warmup
     if not paths:
         yield (
-            "⚠️ 请先上传至少 5 张预置帧。",
+            (
+                f"⚠️ 请先上传至少 {required} 张预置帧"
+                f"（前 {controller.warmup} 帧预热丢弃，随后抓 {controller.count} 帧）。"
+            ),
+            controller.teaching_progress(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+        return
+    if len(paths) < required:
+        yield (
+            (
+                f"⚠️ 预置帧不足：需要至少 {required} 张，当前 {len(paths)} 张。"
+                f"前 {controller.warmup} 帧只做预热丢弃。"
+            ),
             controller.teaching_progress(),
             gr.update(),
             gr.update(),
@@ -1349,8 +1454,8 @@ def start_teaching(frame: Any) -> tuple[str, str, str, Any, str, Any]:
         ``(教学状态, 抓帧进度, 实时结论, 播报音频, 名称框, 录音组件)``。
         播报音频返回 ``None`` 会立即停止正在播放的声音（防回声）。
     """
-    ok, message = get_realtime().begin_teaching(frame)
     controller = get_realtime()
+    ok, message = controller.begin_teaching(frame)
     if not ok:
         return (
             message,
@@ -1379,14 +1484,34 @@ def teaching_transcribe(
 
 def teaching_confirm(
     name: str,
-) -> tuple[str, str, str, str, Any, str, Any, str]:
-    """Tab3「确认入库」事件：5 帧逐条入库并持久化，随后恢复持续识别。"""
+) -> tuple[str, str, str, Any, Any, Any, Any, Any]:
+    """Tab3「确认入库」事件：5 帧逐条入库并持久化，成功后才恢复持续识别。
+
+    只有控制器真的退出教学态（入库成功或写盘失败已回滚）才清空名称/录音并
+    提示「已恢复」；抓帧不足、名称为空等拒绝分支保持教学态，避免界面骗人。
+    """
     controller = get_realtime()
+    was_teaching = controller.teaching
     status, summary = controller.commit_teaching(name)
+    progress = controller.teaching_progress()
+
+    if not was_teaching or controller.teaching:
+        # 仍在教学态：保留名称框、录音与当前画面，让用户补帧或改名称。
+        return (
+            status,
+            summary,
+            progress,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+
     return (
         status,
         summary,
-        controller.teaching_progress(),
+        progress,
         "",
         None,
         "▶ 已恢复持续识别，等待下一帧……",
@@ -1395,10 +1520,23 @@ def teaching_confirm(
     )
 
 
-def teaching_cancel() -> tuple[str, str, str, str, Any, str, Any, str]:
+def teaching_cancel() -> tuple[str, str, str, Any, Any, Any, Any, Any]:
     """Tab3「取消教学」事件：丢弃抓帧，不产生任何库记录。"""
     controller = get_realtime()
+    was_teaching = controller.teaching
     status, summary, progress = controller.cancel_teaching()
+    if not was_teaching:
+        # 本来就不在教学态：不要顺手清掉用户正在看的画面/名称。
+        return (
+            status,
+            summary,
+            progress,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
     return (
         status,
         summary,
@@ -1546,7 +1684,7 @@ def build_demo() -> gr.Blocks:
                 f"{REALTIME_STREAM_EVERY:.1f} s/帧送入 ResNet18，实时叠加名称与相似度，"
                 "未知显示「未知物体」；播报按「结果变化 + 4 s 冷却」节流。  \n"
                 "没有摄像头时，可上传一段预置帧序列（多张图片）模拟视频流，"
-                "或用它完成教学抓帧。"
+                "或用它完成教学抓帧。教学会先丢 2 帧预热，所以帧序列至少准备 7 张。"
             )
             realtime = get_realtime(library)
             with gr.Row():
@@ -1559,7 +1697,7 @@ def build_demo() -> gr.Blocks:
                         height=300,
                     )
                     frame_files = gr.File(
-                        label="预置帧序列（无摄像头时使用，按文件名顺序播放）",
+                        label="预置帧序列（无摄像头时使用；教学至少 7 张，前 2 张预热丢弃）",
                         file_count="multiple",
                         file_types=["image"],
                         type="filepath",

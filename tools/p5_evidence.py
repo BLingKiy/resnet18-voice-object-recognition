@@ -368,9 +368,12 @@ def main() -> int:
 
     # ------------------------------------------------------------------ 判据 2
     teach_frames = image_paths(data_dir, "known", args.teach_object)
-    if len(teach_frames) < app.TEACHING_FRAME_COUNT:
+    # 当前帧 + 1 张预热 + 5 张注册帧 = 7 张；少于这个数抓不满。
+    required_frames = app.TEACHING_FRAME_COUNT + app.TEACHING_WARMUP_FRAMES
+    if len(teach_frames) < required_frames:
         print(
-            f"[P5] {args.teach_object} 的注册图不足 {app.TEACHING_FRAME_COUNT} 张",
+            f"[P5] {args.teach_object} 的注册图不足 {required_frames} 张"
+            f"（{app.TEACHING_WARMUP_FRAMES} 张预热 + {app.TEACHING_FRAME_COUNT} 张注册）",
             file=sys.stderr,
         )
         return 2
@@ -385,10 +388,13 @@ def main() -> int:
         "audio_cleared": controller.audio_path is None,
     }
     for path in teach_frames[1:]:
+        if controller.captured_count >= app.TEACHING_FRAME_COUNT:
+            break
         time.sleep(0.3)
         controller.offer_frame(load_rgb(path))
     capture = {
         "requested": app.TEACHING_FRAME_COUNT,
+        "warmup_discarded": app.TEACHING_WARMUP_FRAMES,
         "captured": controller.captured_count,
         "intervals_s": controller.capture_intervals,
         "begin_ok": begin_ok,
@@ -488,6 +494,8 @@ def main() -> int:
     keyboard_before = summarize_library(keyboard_library)
     keyboard_controller.begin_teaching(load_rgb(teach_frames[0]))
     for path in teach_frames[1:]:
+        if keyboard_controller.captured_count >= app.TEACHING_FRAME_COUNT:
+            break
         time.sleep(0.3)
         keyboard_controller.offer_frame(load_rgb(path))
     asr_calls: list[object] = []
@@ -529,15 +537,17 @@ def main() -> int:
     cancel_before = summarize_library(cancel_library)
     cancel_hash_before = sha256_file(cancel_library.path)
     cancel_controller.begin_teaching(load_rgb(teach_frames[0]))
-    for path in teach_frames[1:3]:
+    # 1 张预热 + 3 张正式帧；取消后这 3 张必须全部丢弃。
+    for path in teach_frames[1:5]:
         time.sleep(0.3)
         cancel_controller.offer_frame(load_rgb(path))
+    captured_before_cancel = cancel_controller.captured_count
     cancel_status, _, _ = cancel_controller.cancel_teaching()
     cancel_after = summarize_library(cancel_library)
     cancel_hash_after = sha256_file(cancel_library.path)
     cancel = {
         "status": cancel_status,
-        "captured_before_cancel": 3,
+        "captured_before_cancel": captured_before_cancel,
         "before": cancel_before,
         "after": cancel_after,
         "hash_unchanged": cancel_hash_before == cancel_hash_after,
