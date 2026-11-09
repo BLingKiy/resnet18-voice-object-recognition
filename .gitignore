@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .pytest-tmp*/
+pytest-cache-files-*/
 .ruff_cache/
 torchinductor_*/
 
@@ -19,3 +20,8 @@ acl-recovery/
 # 本地密钥配置：只提交 .env.example，真实 .env 绝不入库
 .env
 .env.local
+
+# 数据集：图片与特征库全部留在本地，只提交可复核的清单。
+# 用 data/* 而不是 data/：父目录被整体忽略后，!data/manifest.csv 无法再放行。
+data/*
+!data/manifest.csv
