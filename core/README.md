@@ -10,6 +10,9 @@
 | `core/features.py` | ResNet18 加载、预处理、512 维特征提取、L2 归一化、图片解码与去重摘要 |
 | `core/library.py` | JSON 特征库的增、查、保存、加载与完整性校验 |
 | `core/recognize.py` | 余弦相似度 top-k 检索、按物体聚合、阈值判未知 |
+| `core/pipeline.py` | 静态/实时共用的识别编排、背景门、中心裁剪、标注与计时 |
+| `core/background.py` | 实时背景向量的中位数学习、相似度、独立 JSON 持久化 |
+| `core/realtime_config.py` | `threshold_static` / `threshold_realtime` / `threshold_bg` 三键配置 |
 | `tools/demo_cli.py` | 命令行验收：录入 / 识别 / 统计 / 批量评测 / 写阈值 |
 | `tests/` | 假编码器单测（秒级）+ 可选真实 ResNet18 端到端测试 |
 
@@ -106,6 +109,8 @@ for row in library.stats():
    就认为该物体接近；平均分会因为"没拍到的角度"被拖低。
 4. **阈值优先级**：显式参数 > 特征库 `threshold` > `DEFAULT_THRESHOLD`（0.60）。
    本项目已用未参与录入的测试图校准，库里写入 **0.8124**；0.60 只在库没有校准值时兜底。
+   实时链路另用 `data/realtime.json` 的 `threshold_realtime` / `threshold_bg`：
+   T_rt 暂等于 0.8124、T_bg=0.90，两项都**待真机校准**，不能当成静态阈值的替代。
 5. **未知判断是 `score < threshold`**：等于阈值算已知，避免边界抖动时来回跳。
 6. **重复图去重**：同一物体内按像素摘要去重，防止"向量条数 ≠ 注册图数"，
    也防止同一张图反复入库把该物体的 max 分数抬高。

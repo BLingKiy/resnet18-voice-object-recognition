@@ -26,8 +26,9 @@
     RN18_HOST          # 监听地址，默认 127.0.0.1（只给本机演示用）
     RN18_PORT          # 监听端口，默认 7860
 
-说明：判定阈值当前是核心层里的**占位值**，最终必须由 P6 用未参与录入的
-测试图校准；界面会原样显示本次实际使用的阈值，不会把占位值包装成结论。
+说明：静态阈值由 P6b 用未参与录入的测试图校准为 **0.8124**，写在特征库里；
+实时链路另用 `data/realtime.json` 的 `threshold_realtime` / `threshold_bg`
+（**待真机校准**），不在本文件里硬编码任何阈值结论。
 """
 
 from __future__ import annotations
@@ -66,10 +67,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import (
+    BACKGROUND_LABEL,
     UNKNOWN_LABEL,
     AddResult,
+    BackgroundModel,
     Encoder,
     FeatureLibrary,
+    RealtimeConfig,
     Recognition,
     StreamResult,
     add_to_library,
@@ -79,10 +83,16 @@ from core import (
     recognize_stream,
     resolve_threshold,
     save_library,
-    speech_text as _pipeline_speech_text,
     to_pil,
 )
+from core import speech_text as _pipeline_speech_text
+from core.background import DEFAULT_BACKGROUND_PATH
 from core.library import DEFAULT_LIBRARY_PATH
+from core.realtime_config import (
+    DEFAULT_REALTIME_CONFIG_PATH,
+    load_realtime_config,
+    save_realtime_config,
+)
 from voice import (
     AsrAudioError,
     AsrDependencyError,
@@ -112,6 +122,21 @@ LIBRARY_PATH = Path(
 if not LIBRARY_PATH.is_absolute():
     LIBRARY_PATH = (PROJECT_ROOT / LIBRARY_PATH).resolve()
 
+# 背景与实时配置与特征库并列，但**绝不写进 library.json**：
+# - background.json 只存当前机位的背景向量；
+# - realtime.json 只存 T_static/T_rt/T_bg 与两个开关。
+BACKGROUND_PATH = Path(
+    os.environ.get("RN18_BACKGROUND_PATH", str(DEFAULT_BACKGROUND_PATH))
+).expanduser()
+if not BACKGROUND_PATH.is_absolute():
+    BACKGROUND_PATH = (PROJECT_ROOT / BACKGROUND_PATH).resolve()
+
+REALTIME_CONFIG_PATH = Path(
+    os.environ.get("RN18_REALTIME_CONFIG", str(DEFAULT_REALTIME_CONFIG_PATH))
+).expanduser()
+if not REALTIME_CONFIG_PATH.is_absolute():
+    REALTIME_CONFIG_PATH = (PROJECT_ROOT / REALTIME_CONFIG_PATH).resolve()
+
 LIBRARY_HEADERS = ["物体名称", "特征条数", "首张注册图", "录入时间"]
 NEIGHBOR_HEADERS = ["排名", "物体", "相似度", "相似度%", "最近注册图"]
 
@@ -128,6 +153,9 @@ TTS_UNAVAILABLE_HINT = "⚠️ 语音播报不可用，请检查网络"
 
 # 实时链路参数（任务要求：帧流 0.3–0.5 s；教学帧间隔 0.2–0.3 s；TTS 冷却 3–5 s）。
 REALTIME_STREAM_EVERY = 0.3
+# 背景学习：进实时页先收 20 帧，丢前 2 帧（黑帧/过曝）后逐维取中位数。
+BACKGROUND_FRAMES = 20
+BACKGROUND_DROP_FIRST = 2
 TEACHING_FRAME_COUNT = 5
 # 首帧常为黑帧/过曝：进入教学态后先丢 2 帧，再开始计数，避免把废帧写进库。
 TEACHING_WARMUP_FRAMES = 2
@@ -432,6 +460,24 @@ def format_headline(result: Recognition) -> str:
     return headline
 
 
+def format_background_headline(stream: StreamResult, bg_threshold: float) -> str:
+    """生成背景门命中时的结论 Markdown（明确写出"不检索、不播报"）。
+
+    Args:
+        stream: 本帧实时结果，``stream.is_background`` 应为真。
+        bg_threshold: 本帧使用的 T_bg。
+
+    Returns:
+        给 ``gr.Markdown`` 的结论文本。
+    """
+    similarity = float(stream.bg_similarity or 0.0)
+    return (
+        f"### {BACKGROUND_LABEL}（背景）\n\n"
+        f"背景相似度 **{similarity:.4f}** ≥ T_bg **{bg_threshold:.4f}**，"
+        "本帧不进入物体检索、不播报。"
+    )
+
+
 def neighbor_rows(result: Recognition) -> list[list[str]]:
     """把前 K 个近邻转成表格行。"""
     return [
@@ -616,6 +662,7 @@ class FrameOutcome:
         tts_status: 播报状态提示。
         progress: 教学进度提示。
         gate_spoken: 本帧是否真的触发了播报（供证据脚本与测试断言）。
+        is_background: 本帧是否被背景门判为"没有可识别物体"。
     """
 
     frame: np.ndarray | None
@@ -625,6 +672,7 @@ class FrameOutcome:
     tts_status: str
     progress: str
     gate_spoken: bool = False
+    is_background: bool = False
 
 
 def _looks_unusable(frame: Image.Image) -> str:
@@ -676,6 +724,13 @@ class RealtimeController:
         count: 一次教学抓取的帧数，固定 5。
         warmup: 进入教学态后先丢弃的帧数（含触发时的当前帧），默认 2。
         min_gap: 相邻教学帧的最小间隔（秒），0.2–0.3 之间。
+        background: 预置背景模型；``None`` 且给了 ``background_path`` 时进入
+            "学习背景"状态，由帧流自动收集 20 帧。
+        background_path: ``background.json`` 路径；学完自动落盘。
+        config: 显式实时配置（测试注入）；``None`` 时按 ``config_path`` 读取。
+        config_path: ``realtime.json`` 路径；与 ``background_path`` 一起由界面传入。
+        learn_frames: 背景学习要收集的有效帧数，默认 20。
+        drop_first: 背景学习开头丢弃的帧数，默认 2。
     """
 
     def __init__(
@@ -690,6 +745,12 @@ class RealtimeController:
         warmup: int = TEACHING_WARMUP_FRAMES,
         min_gap: float = TEACHING_MIN_GAP,
         min_interval: float = REALTIME_STREAM_EVERY,
+        background: BackgroundModel | None = None,
+        background_path: str | Path | None = None,
+        config: RealtimeConfig | None = None,
+        config_path: str | Path | None = None,
+        learn_frames: int = BACKGROUND_FRAMES,
+        drop_first: int = BACKGROUND_DROP_FIRST,
     ) -> None:
         if count < 1:
             raise ValueError("count 必须 >= 1")
@@ -699,6 +760,10 @@ class RealtimeController:
             raise ValueError("min_gap 不能为负数")
         if min_interval < 0:
             raise ValueError("min_interval 不能为负数")
+        if learn_frames < 1:
+            raise ValueError("learn_frames 必须 >= 1")
+        if drop_first < 0:
+            raise ValueError("drop_first 不能为负数")
         self.library = library
         self.encoder = encoder
         self._gate = gate if gate is not None else SpeechGate(TTS_COOLDOWN_SECONDS)
@@ -708,6 +773,34 @@ class RealtimeController:
         self.warmup = int(warmup)
         self.min_gap = float(min_gap)
         self.min_interval = float(min_interval)
+        self.learn_frames = int(learn_frames)
+        self.drop_first = int(drop_first)
+
+        self._background_path = (
+            Path(background_path).expanduser() if background_path is not None else None
+        )
+        self._config_path = (
+            Path(config_path).expanduser() if config_path is not None else None
+        )
+        # 兼容旧测试：只有显式给了 background_path（界面就是这么传的）才自动
+        # 学背景；否则保持 rc1 的单路行为，避免 141 条旧用例被迫等 20 帧。
+        if config is not None:
+            self.config = config
+        elif self._config_path is not None:
+            self.config = load_realtime_config(self._config_path, library=library)
+        else:
+            self.config = RealtimeConfig.defaults(library, gate_enabled=False)
+
+        self.threshold_realtime = self.config.threshold_realtime
+        self.threshold_bg = self.config.threshold_bg
+        self.crop_margin = self.config.crop_margin
+        self.gate_enabled = self.config.gate_enabled
+
+        self.background = background
+        self.background_learning = background is None and self._background_path is not None
+        self.background_error: str | None = None
+        self.background_note: str | None = None
+        self._bg_buffer: list[Image.Image] = []
 
         self._lock = threading.RLock()
         self.teaching = False
@@ -727,6 +820,7 @@ class RealtimeController:
         self._tts_generation = 0
         self._last_elapsed_ms: float | None = None
         self._last_result: Recognition | None = None
+        self._last_stream: StreamResult | None = None
         self._last_recognized_at = float("-inf")
         self._last_headline = REALTIME_IDLE_HINT
 
@@ -775,11 +869,178 @@ class RealtimeController:
         with self._lock:
             return self._last_elapsed_ms
 
+    @property
+    def last_stream(self) -> StreamResult | None:
+        """最近一帧完整的 ``StreamResult``（含背景/裁剪字段）。"""
+        with self._lock:
+            return self._last_stream
+
+    @property
+    def background_ready(self) -> bool:
+        """背景向量是否已经学完、可用于背景门。"""
+        with self._lock:
+            return self.background is not None and not self.background_learning
+
+    # ------------------------------------------------------------------ 背景
+    def _background_used_frames_locked(self) -> int:
+        """已收集的有效背景帧数（扣掉开头预热帧，上限 learn_frames）。"""
+        return min(
+            self.learn_frames,
+            max(0, len(self._bg_buffer) - self.drop_first),
+        )
+
+    def background_status_text(self) -> str:
+        """背景学习/背景门状态的一行中文说明。"""
+        with self._lock:
+            if not self.gate_enabled:
+                return "背景门关（rc1 对照）"
+            if self.background_error:
+                return f"背景学习失败：{self.background_error}"
+            if self.background_learning:
+                return (
+                    f"背景学习中 {self._background_used_frames_locked()}"
+                    f"/{self.learn_frames}"
+                )
+            if self.background is not None:
+                if self.background_note:
+                    return f"背景已建立（注意：{self.background_note}）"
+                return f"背景已建立（{self.background.frames_used} 帧）"
+            return "未学背景"
+
+    def _background_progress_text_locked(self) -> str:
+        """学习背景期间给用户看的具体操作提示（调用方必须持锁）。"""
+        if self.background_error:
+            return (
+                f"❌ 背景学习失败：{self.background_error}  \n"
+                "请点「重新学背景」重试；在此期间实时识别退回 rc1 单路行为。"
+            )
+        used = self._background_used_frames_locked()
+        if self.background_learning:
+            return (
+                f"📷 正在学习背景 **{used}/{self.learn_frames}**："
+                "请让画面对准空场景并保持不动"
+                f"（前 {self.drop_first} 帧丢弃，避免黑帧/过曝）。"
+            )
+        if self.background is not None:
+            return (
+                f"✅ 背景已建立（{self.background.frames_used} 帧）。"
+                "把物体放进画面即可开始识别；移走物体 1–2 秒后应回到「画面中没有可识别物体」。"
+            )
+        return "尚未学习背景。点「重新学背景」开始。"
+
+    def _learn_background_locked(self, pil: Image.Image) -> bool:
+        """收集一帧背景并尝试学习；返回本次是否刚好学完（调用方必须持锁）。
+
+        背景学习期间不识别、不播报；坏帧只跳过，不计入有效帧。
+        """
+        problem = _looks_unusable(pil)
+        if problem:
+            self.background_error = None
+            self._last_headline = f"📷 背景学习：这一帧不可用（{problem}），已跳过。"
+            return False
+
+        self._bg_buffer.append(pil)
+        if len(self._bg_buffer) < self.drop_first + self.learn_frames:
+            return False
+
+        frames = list(self._bg_buffer[: self.drop_first + self.learn_frames])
+        try:
+            model = BackgroundModel.learn(
+                frames,
+                encoder=self.encoder,
+                take=self.learn_frames,
+                drop_first=self.drop_first,
+            )
+        except Exception as exc:  # 背景失败不能中断实时页
+            _LOGGER.exception("背景学习失败")
+            self.background_error = f"{type(exc).__name__}: {exc}"
+            self.background_learning = False
+            self.background = None
+            self._bg_buffer.clear()
+            return False
+
+        self.background = model
+        self.background_learning = False
+        self.background_error = None
+        self._bg_buffer.clear()
+        # 学完背景的第一帧应该立即识别，不能被"距上一帧不足 0.3 s"节流掉。
+        self._last_recognized_at = float("-inf")
+
+        if self._background_path is not None:
+            try:
+                model.save(self._background_path)
+                self.background_note = None
+            except OSError as exc:
+                _LOGGER.warning("背景保存失败: %s", exc)
+                self.background_note = f"背景已建立但保存失败：{exc}"
+        return True
+
+    def relearn_background(self) -> tuple[str, str]:
+        """丢弃当前背景并重新进入学习状态（界面「重新学背景」按钮）。
+
+        Returns:
+            ``(结论 Markdown, 统计行)``。
+        """
+        with self._lock:
+            self.background = None
+            self.background_learning = True
+            self.background_error = None
+            self.background_note = None
+            self._bg_buffer.clear()
+            self._last_stream = None
+            self._last_result = None
+            self._last_headline = (
+                f"### 重新学习背景\n\n请把画面对准空场景并保持不动："
+                f"先丢弃前 {self.drop_first} 帧，再采集 **{self.learn_frames}** 帧建立背景。"
+            )
+            return self._last_headline, self.stats_text()
+
+    def set_gate_enabled(self, enabled: bool) -> tuple[str, str]:
+        """开关背景门；关闭后实时链路退回 rc1 的单路识别行为。
+
+        Args:
+            enabled: ``True`` 启用背景门 + 中心裁剪，``False`` 退回 rc1。
+
+        Returns:
+            ``(结论 Markdown, 统计行)``。
+        """
+        with self._lock:
+            self.gate_enabled = bool(enabled)
+            self.config = RealtimeConfig(
+                threshold_static=resolve_threshold(self.library),
+                threshold_realtime=self.threshold_realtime,
+                threshold_bg=self.threshold_bg,
+                gate_enabled=self.gate_enabled,
+                crop_margin=self.crop_margin,
+            )
+            self._persist_config_locked()
+            if self.gate_enabled:
+                self._last_headline = (
+                    "### 背景门已开启\n\n先学背景，之后每帧先过背景门，再检索；"
+                    "物体占比小时会尝试中心 60% 裁剪。"
+                )
+            else:
+                self._last_headline = (
+                    "### 背景门已关闭\n\n行为退回 rc1：每帧直接检索，"
+                    "不做背景剔除与中心裁剪（便于现场对照）。"
+                )
+            return self._last_headline, self.stats_text()
+
+    def _persist_config_locked(self) -> None:
+        """把当前开关写回 ``realtime.json``；失败只记录，不影响识别。"""
+        if self._config_path is None:
+            return
+        try:
+            save_realtime_config(self.config, self._config_path)
+        except Exception as exc:  # noqa: BLE001 - 配置写盘失败不能中断演示
+            _LOGGER.warning("实时配置保存失败: %s", exc)
+            self.background_note = f"配置未保存：{exc}"
+
     # ------------------------------------------------------------------ 文案
     def stats_text(self) -> str:
-        """本帧耗时、阈值与库容量的一行 Markdown。"""
+        """本帧耗时、三个阈值、背景状态与库容量的一行 Markdown。"""
         with self._lock:
-            threshold = resolve_threshold(self.library)
+            threshold_static = resolve_threshold(self.library)
             elapsed = (
                 f"{self._last_elapsed_ms:.1f} ms"
                 if self._last_elapsed_ms is not None
@@ -788,10 +1049,15 @@ class RealtimeController:
             state = "⏸ 教学态（识别与播报已暂停）" if self.teaching else "▶ 持续识别"
             objects = self.library.object_count
             vectors = self.library.total_vectors
+            background = self.background_status_text()
+            gate = "开" if self.gate_enabled else "关"
+            crop = "已采用裁剪" if (self._last_stream and self._last_stream.used_crop) else ""
+        extra = f" · {crop}" if crop else ""
         return (
-            f"{state} · 本帧 **{elapsed}**（含特征提取与标注）· "
-            f"阈值 {threshold:.2f} · 库 **{objects}** 物体 / "
-            f"**{vectors}** 条"
+            f"{state} · 本帧 **{elapsed}**（含特征提取与标注） · "
+            f"T_static **{threshold_static:.4f}** · T_rt **{self.threshold_realtime:.4f}** · "
+            f"T_bg **{self.threshold_bg:.4f}** · 背景门 **{gate}** · {background} · "
+            f"库 **{objects}** 物体 / **{vectors}** 条{extra}"
         )
 
     def teaching_progress(self) -> str:
@@ -879,6 +1145,22 @@ class RealtimeController:
                     self.teaching_progress(),
                 )
 
+            # 背景学习优先于识别：先收 20 帧（丢前 2 帧）建立当前机位的背景，
+            # 期间不检索、不播报。返回原始帧让用户能看到画面与进度。
+            if self.background_learning:
+                self._learn_background_locked(pil)
+                headline = self._background_progress_text_locked()
+                self._last_headline = headline
+                return FrameOutcome(
+                    np.asarray(pil, dtype=np.uint8),
+                    headline,
+                    self.stats_text(),
+                    self._audio_path,
+                    self._tts_status,
+                    self.teaching_progress(),
+                    is_background=False,
+                )
+
             # Gradio 4.44 的 webcam 流由前端按自身节奏推帧，服务端再按
             # 0.3 s 节流：只处理"距上一帧已满 min_interval"的帧，保证
             # recognize_stream 的实际调用频率落在任务要求的 0.3–0.5 s。
@@ -896,9 +1178,16 @@ class RealtimeController:
 
             try:
                 stream: StreamResult = recognize_stream(
-                    pil, self.library, encoder=self.encoder
+                    pil,
+                    self.library,
+                    threshold=self.threshold_realtime,
+                    encoder=self.encoder,
+                    background=self.background,
+                    bg_threshold=self.threshold_bg,
+                    gate_enabled=self.gate_enabled,
+                    crop_margin=self.crop_margin,
                 )
-            except Exception as exc:  # noqa: BLE001 - 界面只展示可读错误
+            except Exception as exc:  # 界面只展示可读错误
                 _LOGGER.exception("实时识别失败")
                 return FrameOutcome(
                     None,
@@ -911,9 +1200,20 @@ class RealtimeController:
 
             self._last_elapsed_ms = stream.elapsed_ms
             self._last_result = stream.recognition
-            self._last_headline = format_headline(stream.recognition)
+            self._last_stream = stream
+            if stream.is_background:
+                self._last_headline = format_background_headline(
+                    stream, self.threshold_bg
+                )
+            else:
+                self._last_headline = format_headline(stream.recognition)
             spoken = False
-            if not self.tts_paused and self._gate.should_speak(stream.speech):
+            # 背景门命中时 speech 为空串：不合成、不播放、不留下"未知物体"话术。
+            if (
+                stream.speech
+                and not self.tts_paused
+                and self._gate.should_speak(stream.speech)
+            ):
                 self._speak_locked(stream.speech)
                 spoken = True
 
@@ -925,6 +1225,7 @@ class RealtimeController:
                 self._tts_status,
                 self.teaching_progress(),
                 gate_spoken=spoken,
+                is_background=stream.is_background,
             )
 
     # ------------------------------------------------------------ 教学：抓帧
@@ -962,6 +1263,9 @@ class RealtimeController:
             self.tts_paused = True
             self._capture = []
             self._capture_times = []
+            # 教学画面里有物体，绝不能混进背景学习缓冲；没学完就等教学结束重来。
+            if self.background_learning:
+                self._bg_buffer.clear()
             self._warmup_remaining = max(0, self.warmup - 1)
             self._capture_warning = None
             now = self._clock()
@@ -1197,6 +1501,12 @@ class RealtimeController:
         self._tts_status = TTS_IDLE_HINT
         # 恢复时清零冷却：教学期间可能暂停了几十秒，不清零会立刻补播旧结果。
         self._gate.reset()
+        # 教学前还没学完背景：丢弃含物体的半段缓冲，退出后重新收 20 帧，
+        # 避免把教学时摆在镜头前的物体当成背景。
+        if self._background_path is not None and self.background is None:
+            self.background_learning = True
+            self.background_error = None
+            self._bg_buffer.clear()
 
     def _recover_library(self) -> None:
         """写盘失败后尽量回到磁盘版本，避免内存比磁盘多出半条记录。"""
@@ -1268,8 +1578,25 @@ def get_realtime(library: FeatureLibrary | None = None) -> RealtimeController:
     target = library if library is not None else get_library()
     with _STORE_LOCK:
         if _REALTIME is None or _REALTIME.library is not target:
-            _REALTIME = RealtimeController(target, reloader=_reload_into_global)
+            _REALTIME = RealtimeController(
+                target,
+                reloader=_reload_into_global,
+                background_path=BACKGROUND_PATH,
+                config_path=REALTIME_CONFIG_PATH,
+                learn_frames=BACKGROUND_FRAMES,
+                drop_first=BACKGROUND_DROP_FIRST,
+            )
         return _REALTIME
+
+
+def relearn_background() -> tuple[str, str]:
+    """Tab3「重新学背景」事件：清空旧背景并重新收 20 帧。"""
+    return get_realtime().relearn_background()
+
+
+def set_background_gate(enabled: bool) -> tuple[str, str]:
+    """Tab3「背景门」开关事件：关闭后实时链路退回 rc1 行为。"""
+    return get_realtime().set_gate_enabled(enabled)
 
 
 def realtime_frame(
@@ -1708,6 +2035,17 @@ def build_demo() -> gr.Blocks:
                     teach_button = gr.Button(
                         "教它（抓 5 帧，暂停识别与播报）", variant="primary"
                     )
+                    with gr.Row():
+                        relearn_bg_button = gr.Button("重新学背景（对准空场景）")
+                        gate_toggle = gr.Checkbox(
+                            label="背景门（关闭 = 退回 rc1 对照）",
+                            value=realtime.gate_enabled,
+                        )
+                    gr.Markdown(
+                        f"首次进入实时页会先收 **{BACKGROUND_FRAMES}** 帧、丢前 "
+                        f"**{BACKGROUND_DROP_FIRST}** 帧学背景；背景门命中显示"
+                        "「画面中没有可识别物体（背景）」，不检索、不播报。"
+                    )
 
                 with gr.Column(scale=1):
                     live_image = gr.Image(
@@ -1780,6 +2118,16 @@ def build_demo() -> gr.Blocks:
                     teach_progress,
                 ],
                 show_progress="hidden",
+            )
+            relearn_bg_button.click(
+                relearn_background,
+                inputs=None,
+                outputs=[live_headline, live_stats],
+            )
+            gate_toggle.change(
+                set_background_gate,
+                inputs=[gate_toggle],
+                outputs=[live_headline, live_stats],
             )
             teach_sequence_button.click(
                 teach_from_sequence,

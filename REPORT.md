@@ -1,6 +1,6 @@
 # 项目报告：基于 ResNet18 和语音交互的物体识别 Demo
 
-> 文档状态：**P6 完成**。阈值已用「未参与录入」的测试图 + 未知样本校准为 **0.8124** 并写入特征库，已知通过与未知拒识两组验证均已复跑。
+> 文档状态：**P6 完成 + P5.1 背景自适应实现完成（真机阈值待校准）**。静态阈值已用「未参与录入」的测试图 + 未知样本校准为 **0.8124** 并写入特征库；P5.1 的背景门/中心裁剪代码与离线自测已完成，`T_rt` 与 `T_bg` 仍是**待真机校准**的临时值，不作为结论。
 > 本报告中的数值全部来自本机实际运行的命令输出，可复现（命令见各节）。实机摄像头、真人录音与现场拍摄仍需在小组电脑上复核，本报告**不声称已实机验证**。
 
 ## 1. 系统功能
@@ -46,6 +46,29 @@ flowchart LR
 - **JSON 特征库而非数据库**：满足"重启后特征库仍在"，零依赖、可读、约 300 KB；用 SQLite / FAISS 属工程化扩张，不加分。
 - **阈值三级优先级**：显式参数 > 特征库 `threshold`（本项目已写入 `0.8124`）> 代码兜底 `DEFAULT_THRESHOLD = 0.60`。兜底值只在"库未经校准"时生效，**不是最终结论**。
 - **密钥不写死**：只从环境变量或 `.env` 读取，repr 屏蔽 Secret，异常只带错误码不拼接含 Secret 的 URL。
+
+### 2.3 实时背景自适应（P5.1）
+
+目标：摄像头前的环境复杂，整帧特征容易被背景主导，出现"背景被认成已录入物体"或"物体在场却认不出"。实现仍走 ResNet18 + 余弦检索，不引入检测/分割模型，也不接在线服务。
+
+```mermaid
+flowchart LR
+    A[实时帧] --> B[512 维特征]
+    B --> C{cos(帧, BG) >= T_bg?}
+    C -->|是| D[画面中没有可识别物体<br/>不检索 / 不播报]
+    C -->|否| E[全帧检索 + 中心 60% 裁剪检索]
+    E --> F{裁剪分 > 全帧分 + margin<br/>且裁剪分 >= T_rt?}
+    F -->|是| G[采用裁剪结果]
+    F -->|否| H[采用全帧结果]
+    G --> I[标注 + 播报]
+    H --> I
+```
+
+- **背景学习**：进实时页先收 20 帧，丢前 2 帧（黑帧/过曝），对剩余帧逐维取中位数并 L2 归一化；写入独立的 `data/background.json`，schema 为 `rn18-background`。背景不写入 `library.json`，不计入物体数量，不进入 P6b 校准集。
+- **背景门**：每帧先算与背景向量的余弦，`>= T_bg` 时直接返回「画面中没有可识别物体」，不检索、不产生播报文本；界面统计行显示「背景已建立」与 T_rt/T_bg。可点「重新学背景」重来，也可关掉背景门退回 rc1 对照。
+- **中心裁剪第二路**：PIL 裁 `0.2~0.8` 的中心 60%，只有「裁剪分 > 全帧分 + `crop_margin`」且「裁剪分 >= T_rt」才采用，`StreamResult.used_crop` 明确标记。
+- **阈值分离**：`threshold_static`（库里的 0.8124，不动）、`threshold_realtime`、`threshold_bg` 三个键写在 `data/realtime.json`。**T_rt 与 T_bg 尚未真机校准**：T_rt 暂等于 T_static，T_bg=0.90 是保守初值；两处都标注「待真机校准」，不由代码编造结论。
+- **自检工具**：`tools/realtime_check.py` 支持 `--frames`（离线、不依赖 opencv）与 `--camera`（opencv 可选依赖），输出背景相似度基线、空场景最大误报分/次数、物体分数分布与三个阈值建议；`--write` 只写 `realtime.json`。两分布重叠时脚本拒绝给数字，避免把拍脑袋的值写进配置。
 
 ## 3. 测试结果
 
@@ -156,13 +179,13 @@ python tools/demo_cli.py threshold --set 0.8124
 ### 3.5 单元与端到端测试
 
 ```bash
-python -m pytest tests -q                     # 142 passed, 4 skipped
-RUN_RESNET_TESTS=1 python -m pytest tests -q  # 145 passed, 1 skipped
+python -m pytest tests -q                     # 170 passed, 5 skipped（P5.1 实现后）
+RUN_RESNET_TESTS=1 python -m pytest tests -q  # 含真实权重端到端
 ```
 
-- 环境：Python 3.11.9 / torch 2.2.2+cpu / torchvision / numpy 1.26.4 / gradio 5.50.0。
-- 默认运行跳过 4 项：3 项真实 ResNet 端到端用例（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 联网用例（需 `RN18_TTS_LIVE=1`）；打开开关后为 **145 passed, 1 skipped**，唯一跳过项是**必须联网**的真实 TTS 合成，本机不联网故不伪造结果。
-- 覆盖要点：`test_library.py`（增删查改、去重、原子写、schema 校验）、`test_recognize.py`（检索、物体聚合、判未知边界、阈值优先级）、`test_features.py`（预处理、归一化、维度）、`test_asr_config.py`（密钥优先级、repr 屏蔽、错误码）、`test_tts.py`（合成、节流 `SpeechGate`、后台线程、失败回调）、`test_pipeline.py`（静态/实时共用同一检索结论与标注）、`test_cli.py`（命令行输出契约）、`test_unknown_check.py`（未知拒识统计、误报判定、退出码）、`test_app.py`（界面事件、录入持久化、标注图）、`test_realtime.py`（连续识别、教学抓帧、防回声、取消不写库）、`test_integration_resnet.py`（真实权重端到端）。
+- 环境：Python 3.12.16 / torch 2.15.0+cpu / torchvision 0.29.2 / numpy 2.5.4 / gradio 4.44.1（与本报告 P6 阶段记录的 3.11 环境不同，但结论一致）。
+- 默认运行跳过 5 项：3 项真实 ResNet 端到端用例（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 联网用例（需 `RN18_TTS_LIVE=1`）、1 项 `soundfile` 依赖检查（本机未安装）。
+- 新增覆盖：`test_background.py`（中位数/丢帧、相似度、schema、与特征库分离）、`test_pipeline.py`（背景门不检索不播报、门关字节级退回 rc1、裁剪采用条件、原始打分）、`test_realtime.py`（学背景进度/落盘、门命中不播报、开关、重学、教学兼容、界面控件）、`test_realtime_check.py`（离线帧发现、分布与建议、只写 realtime.json）。
 
 ### 3.6 边界与降级
 
@@ -171,6 +194,65 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q  # 145 passed, 1 skipped
 - **空特征库**：识别时返回"未知物体"并提示先录入，不抛未捕获异常。
 - **特征库损坏**：加载失败抛 `ValueError`，不静默覆盖磁盘文件。
 - **阈值未校准**：库里没有 `threshold` 时回落到 `0.60` 并可用 `--threshold` 临时覆盖，但报告中不把兜底值当结论。
+
+### 3.7 P5.1 背景自适应：离线自测与真机待校准项
+
+**单元/集成测试**（本机实跑）：
+
+```text
+170 passed, 5 skipped, 25 warnings in 9.53s
+```
+
+**自检工具实跑（冒烟数据，不是校准结论）**：本机没有摄像头，也没有真正的"空场景"照片。为了验证工具流程，把 `~/.rn18/data/test` 的 10 张测试图裁出 30 个桌面角落作为"背景帧"（明确不是空场景实拍），物体帧仍用 5 类测试图，另加 2 类未知物体。命令：
+
+```bash
+python tools/realtime_check.py --frames .validation/smoke_frames \
+    --library ~/.rn18/data/features.json --config data/realtime.json \
+    --take 20 --drop-first 2
+```
+
+输出（节选完整尾段）：
+
+```text
+背景帧: 30 张（学习用 20 张）
+空场景（含学习帧）: n=30 mean=0.7212 max=0.9792 min=0.2958
+空场景（留出帧）: n=8 mean=0.5598 max=0.9733 min=0.2958
+物体「earphone」在场: n=2 mean=0.5459 max=0.5530 min=0.5387
+空场景最高分 max=0.7821，≥ T_rt(0.8124) 的误报次数 0/30
+
+已知:earphone   2 0.9219/0.9415/0.9610   0.8558/0.8782/0.9006   0.9219/0.9415/0.9610   0
+已知:keyboard   2 0.9050/0.9143/0.9237   0.8019/0.8308/0.8596   0.9050/0.9143/0.9237   0
+已知:mouse      2 0.9568/0.9651/0.9734   0.9185/0.9199/0.9212   0.9568/0.9651/0.9734   0
+已知:power_bank 2 0.8828/0.9033/0.9239   0.8176/0.8404/0.8632   0.8828/0.9033/0.9239   0
+已知:water_cup  2 0.9026/0.9209/0.9392   0.8139/0.8516/0.8893   0.9026/0.9209/0.9392   0
+未知:充电头      2 0.7362/0.7392/0.7421   0.6905/0.7141/0.7378   0.7362/0.7392/0.7421   0
+未知:剪刀        2 0.6282/0.6324/0.6366   0.6349/0.6419/0.6488   0.6282/0.6324/0.6366   0
+
+T_static = 0.8124（特征库已校准值，保持不变）
+T_bg     = 无建议（当前 0.9000）
+  依据: 物体帧背景相似度 max 0.5530 ≥ 空场景 min 0.2958，两分布重叠：无可靠建议，请重拍空场景或换机位后重跑。
+T_rt     = 0.8124（当前 0.8124，待真机校准）
+  依据: 已知 min 0.8828 与未知 max 0.7421 之间取中点。
+判定: 需要复核（T_bg=不可分/缺数据，T_rt=可分，未知拒识=已验证）
+```
+
+**怎么读这段输出（必须说清楚）**：
+
+- 背景帧是桌面角落拼出来的，不是真正空场景，所以背景相似度分布很散（0.2958~0.9792），工具正确地判定 `T_bg` **不可分并拒绝给数字**；这验证了"重叠时不编数字"的保护逻辑，不代表真机也会重叠。
+- `T_rt=0.8124` 来自**静态测试图**的已知/未知分布，和 P6b 的静态阈值相同；实时帧物体占比不同，不能直接把这个数字当实时结论。真机上要用 `--camera 0 --seconds 30` 重跑。
+- 因此本轮交付的 `data/realtime.json` 里 `threshold_realtime=0.8124`（暂等于 T_static）、`threshold_bg=0.90`（初值），两项都标 **待真机校准**；没有写"已通过实机 30 秒无漏报"这类未跑过的结论。
+
+**P5.1 验证清单（离线部分已过，真机部分待做）**：
+
+| 验证点 | 方式 | 状态 |
+|--------|------|------|
+| 中位数 + 丢前 2 帧 | `test_background.py` 假编码器手算 | ✅ |
+| 背景文件与 `library.json` 分离、库哈希不变 | `test_background.py` | ✅ |
+| 背景门命中不检索、不播报 | `test_pipeline.py` / `test_realtime.py` | ✅ |
+| 门关字节级退回 rc1 | `test_pipeline.py` 比较 `annotated.tobytes()` | ✅ |
+| 裁剪仅在更高且过阈值时采用 | `test_pipeline.py` 中心块图 | ✅ |
+| 三个配置键分离、`threshold_static` 仍 0.8124 | `test_realtime_check.py` + 本机库 | ✅ |
+| 空场景 30 s 无误报、物体 1 s 内识别、移走 1–2 s 恢复 | **真机摄像头** | ⏳ 待小组电脑执行 |
 
 ## 4. 成员分工
 
@@ -183,8 +265,9 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q  # 145 passed, 1 skipped
 | 语音识别 `voice/asr.py`（百度短语音识别极速版） | Python 全栈工程师 | 模块 + 单测，Tab1/Tab3 已接线 |
 | 语音播报 `voice/tts.py`（Edge TTS） | 文通通 | 合成、节流、后台线程与失败降级 |
 | 实时识别与教学 `core/pipeline.py` + `app.py` | Python 全栈工程师 | 帧流识别、预热抓帧、教学入库、防回声 |
+| 背景自适应（P5.1）`core/background.py` + `core/realtime_config.py` + `tools/realtime_check.py` | Python 全栈工程师 | 背景门、中心裁剪、三阈值分离、自检脚本 |
 | 特征与阈值方法论 | 深网网 | 两条分布口径、阈值取法与相近物体分析 |
-| 测试与证据留存（pytest 用例、复跑记录） | 自动化测试 | 141 passed / 1 skipped、校准复跑 |
+| 测试与证据留存（pytest 用例、复跑记录） | 自动化测试 | 170 passed / 5 skipped（P5.1 实现后）、校准复跑 |
 | 四件交付物（README、本报告、函数卡、演示脚本） | 文通通 | P6 定稿版 |
 | 环境与依赖（Python/torch/权重/字体/麦克风） | 小修同学 | 环境锁定与排障记录 |
 
@@ -198,3 +281,10 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q  # 145 passed, 1 skipped
 4. **中文字体**：标注图上的中文是否会变方框（Windows 带微软雅黑，Linux 需装 Noto CJK）。
 5. **权重离线**：`resnet18-f37072fd.pth` 已在目标机缓存目录，现场首跑不联网。
 6. **阈值复核**：用现场换角度/换距离重拍的图片再跑一次 `calibrate.py`，确认 0.8124 仍然合理；未知样本仅 3 类各 2 张，样本量偏小。
+7. **背景自适应真机校准（P5.1）**：
+   - 在演示机位先跑 `python tools/realtime_check.py --camera 0 --seconds 30 --library ~/.rn18/data/features.json`；
+   - 前约 10 秒保持画面为空场景，之后按提示依次放入 5 个已录入物体；如需验证拒识，加 `--unknowns "剪刀,充电头"`；
+   - 看输出里的 `T_bg` 是否有建议、空场景误报次数是否为 0、物体帧 `采用` 的最小分是否高于建议 `T_rt`；
+   - 确认合理后加 `--write` 写回 `data/realtime.json`，再在界面里连跑 30 秒空场景 + 放入/移走物体，确认提示与播报符合验收判据；
+   - 没有摄像头时，用一段真实空场景帧 + 每个物体一段帧按 `frames/background/`、`frames/<物体名>/` 放好，跑 `--frames`，同样不要拿静态测试图冒充空场景。
+8. **背景文件隔离**：确认 `data/background.json` 存在时 `library.json` 的物体数/条数不变；删掉 `background.json` 后实时页能重新学背景，不影响任何已录入物体。
