@@ -215,6 +215,18 @@ def test_dot_env_is_git_ignored() -> None:
     if git is None:
         pytest.skip("本机没有 git，无法验证 .gitignore")
 
+    inside = subprocess.run(
+        [git, "rev-parse", "--is-inside-work-tree"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        pytest.skip("当前目录不在 git 工作区内（例如解压出来的发布包），无法验证 .gitignore")
+
     result = subprocess.run(
         [git, "check-ignore", ".env"],
         cwd=REPO_ROOT,
