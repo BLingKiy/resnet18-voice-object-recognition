@@ -218,13 +218,14 @@ def test_asr_button_is_disabled_and_hint_shown_without_keys(
 
     assert _find_button(demo, "语音识别名称").interactive is False
     audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
-    # P4 之后界面有两个音频组件：Tab1 的麦克风输入 + Tab2 的播报播放器。
-    # 两者 sources 都含 microphone（Gradio 默认值），只能靠 autoplay 区分：
-    # 播报播放器必须自动播放，麦克风输入不能。
+    # P4 之后界面有静态播报播放器；P5 又加了 Tab3 实时播报播放器。
+    # 两者 autoplay=True，靠它和麦克风输入区分。
     playback = [b for b in audios if getattr(b, "autoplay", False)]
     inputs = [b for b in audios if not getattr(b, "autoplay", False)]
-    assert len(playback) == 1
-    assert len(inputs) == 1 and "microphone" in (inputs[0].sources or [])
+    assert len(playback) == 2
+    # Tab1 与 Tab3 各有一个麦克风录音组件。
+    assert len(inputs) == 2
+    assert all("microphone" in (item.sources or []) for item in inputs)
     hints = [
         str(b.value)
         for b in demo.blocks.values()
@@ -542,6 +543,7 @@ def test_build_demo_wires_autoplay_speech_output(
 
     audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
     playback = [b for b in audios if getattr(b, "autoplay", False)]
-    assert len(playback) == 1
-    assert playback[0].interactive is False
+    # Tab2 静态播报 + Tab3 实时播报，两个播放器都不能交互、都要自动播放。
+    assert len(playback) == 2
+    assert all(item.interactive is False for item in playback)
     assert _find_button(demo, "开始识别") is not None

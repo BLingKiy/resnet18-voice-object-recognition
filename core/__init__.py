@@ -36,6 +36,13 @@ from .library import (
     load_library,
     save_library,
 )
+from .pipeline import (
+    StreamResult,
+    annotate_image,
+    recognize_static,
+    recognize_stream,
+    speech_text,
+)
 from .recognize import (
     DEFAULT_THRESHOLD,
     UNKNOWN_LABEL,
@@ -62,7 +69,9 @@ __all__ = [
     "ObjectRecord",
     "ObjectScore",
     "Recognition",
+    "StreamResult",
     "add_to_library",
+    "annotate_image",
     "build_resnet18_encoder",
     "extract_feature",
     "extract_features",
@@ -73,9 +82,12 @@ __all__ = [
     "load_library",
     "object_scores",
     "recognize",
+    "recognize_static",
+    "recognize_stream",
     "resolve_threshold",
     "retrieve",
     "save_library",
+    "speech_text",
     "to_pil",
     "torch_available",
 ]
