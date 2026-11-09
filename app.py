@@ -470,10 +470,10 @@ def format_background_headline(stream: StreamResult, bg_threshold: float) -> str
     Returns:
         给 ``gr.Markdown`` 的结论文本。
     """
-    similarity = float(stream.bg_similarity or 0.0)
+    similarity = float(stream.bg_sim or 0.0)
     return (
         f"### {BACKGROUND_LABEL}（背景）\n\n"
-        f"背景相似度 **{similarity:.4f}** ≥ T_bg **{bg_threshold:.4f}**，"
+        f"背景相似度 **{similarity:.4f}** > T_bg **{bg_threshold:.4f}**，"
         "本帧不进入物体检索、不播报。"
     )
 
@@ -789,12 +789,12 @@ class RealtimeController:
         elif self._config_path is not None:
             self.config = load_realtime_config(self._config_path, library=library)
         else:
-            self.config = RealtimeConfig.defaults(library, gate_enabled=False)
+            self.config = RealtimeConfig.defaults(library, bg_gate_enabled=False)
 
         self.threshold_realtime = self.config.threshold_realtime
         self.threshold_bg = self.config.threshold_bg
-        self.crop_margin = self.config.crop_margin
-        self.gate_enabled = self.config.gate_enabled
+        self.crop_margin = self.config.bg_crop_margin
+        self.gate_enabled = self.config.bg_gate_enabled
 
         self.background = background
         self.background_learning = background is None and self._background_path is not None
@@ -883,11 +883,8 @@ class RealtimeController:
 
     # ------------------------------------------------------------------ 背景
     def _background_used_frames_locked(self) -> int:
-        """已收集的有效背景帧数（扣掉开头预热帧，上限 learn_frames）。"""
-        return min(
-            self.learn_frames,
-            max(0, len(self._bg_buffer) - self.drop_first),
-        )
+        """已采集的背景窗口帧数（上限 learn_frames；前 drop_first 帧只做预热）。"""
+        return min(self.learn_frames, len(self._bg_buffer))
 
     def background_status_text(self) -> str:
         """背景学习/背景门状态的一行中文说明。"""
@@ -904,7 +901,7 @@ class RealtimeController:
             if self.background is not None:
                 if self.background_note:
                     return f"背景已建立（注意：{self.background_note}）"
-                return f"背景已建立（{self.background.frames_used} 帧）"
+                return f"背景已建立（{self.background.sample_count} 帧）"
             return "未学背景"
 
     def _background_progress_text_locked(self) -> str:
@@ -923,7 +920,7 @@ class RealtimeController:
             )
         if self.background is not None:
             return (
-                f"✅ 背景已建立（{self.background.frames_used} 帧）。"
+                f"✅ 背景已建立（{self.background.sample_count} 帧）。"
                 "把物体放进画面即可开始识别；移走物体 1–2 秒后应回到「画面中没有可识别物体」。"
             )
         return "尚未学习背景。点「重新学背景」开始。"
@@ -940,16 +937,17 @@ class RealtimeController:
             return False
 
         self._bg_buffer.append(pil)
-        if len(self._bg_buffer) < self.drop_first + self.learn_frames:
+        if len(self._bg_buffer) < self.learn_frames:
             return False
 
-        frames = list(self._bg_buffer[: self.drop_first + self.learn_frames])
+        frames = list(self._bg_buffer[: self.learn_frames])
         try:
-            model = BackgroundModel.learn(
+            model = BackgroundModel()
+            model.collect(
                 frames,
-                encoder=self.encoder,
-                take=self.learn_frames,
+                n_frames=self.learn_frames,
                 drop_first=self.drop_first,
+                encoder=self.encoder,
             )
         except Exception as exc:  # 背景失败不能中断实时页
             _LOGGER.exception("背景学习失败")
@@ -1010,8 +1008,8 @@ class RealtimeController:
                 threshold_static=resolve_threshold(self.library),
                 threshold_realtime=self.threshold_realtime,
                 threshold_bg=self.threshold_bg,
-                gate_enabled=self.gate_enabled,
-                crop_margin=self.crop_margin,
+                bg_crop_margin=self.crop_margin,
+                bg_gate_enabled=self.gate_enabled,
             )
             self._persist_config_locked()
             if self.gate_enabled:
@@ -1180,12 +1178,12 @@ class RealtimeController:
                 stream: StreamResult = recognize_stream(
                     pil,
                     self.library,
-                    threshold=self.threshold_realtime,
                     encoder=self.encoder,
-                    background=self.background,
-                    bg_threshold=self.threshold_bg,
-                    gate_enabled=self.gate_enabled,
-                    crop_margin=self.crop_margin,
+                    bg_model=self.background,
+                    t_bg=self.threshold_bg,
+                    t_rt=self.threshold_realtime,
+                    bg_gate_enabled=self.gate_enabled,
+                    bg_crop_margin=self.crop_margin,
                 )
             except Exception as exc:  # 界面只展示可读错误
                 _LOGGER.exception("实时识别失败")

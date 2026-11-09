@@ -62,7 +62,7 @@ def test_discover_frames_flat_root_is_background(tmp_path: Path) -> None:
 
 
 def test_evaluate_frames_recommends_separable_thresholds(tmp_path: Path) -> None:
-    _write_images(tmp_path / "background", GRAY, 6)
+    _write_images(tmp_path / "background", GRAY, 12)
     _write_images(tmp_path / "mouse", RED, 2)
     _write_images(tmp_path / "unknown" / "剪刀", BLUE, 2)
 
@@ -72,17 +72,17 @@ def test_evaluate_frames_recommends_separable_thresholds(tmp_path: Path) -> None
         threshold_static=0.6,
         threshold_realtime=0.6,
         threshold_bg=0.9,
-        gate_enabled=True,
-        crop_margin=0.05,
+        bg_crop_margin=0.05,
+        bg_gate_enabled=True,
     )
     frame_set = discover_frames(tmp_path)
 
     report = evaluate_frames(
-        frame_set, library, config, ENCODER, take=2, drop_first=1
+        frame_set, library, config, ENCODER, take=12, drop_first=2
     )
 
-    assert report["background"]["frames"] == 6
-    assert report["background"]["learned"] == 2
+    assert report["background"]["frames"] == 12
+    assert report["background"]["learned"] == 10
     assert report["background"]["bg_sim"]["max"] == pytest.approx(1.0, abs=1e-6)
     assert report["known"]["mouse"]["effective"]["min"] == pytest.approx(1.0, abs=1e-6)
     assert report["unknown"]["剪刀"]["effective"]["max"] == pytest.approx(0.0, abs=1e-6)
@@ -114,7 +114,7 @@ def test_recommend_thresholds_without_unknown_does_not_claim_verified() -> None:
     }
     library = FeatureLibrary(dim=8)
     library.set_threshold(0.6)
-    config = RealtimeConfig(0.6, 0.6, 0.9, True, 0.05)
+    config = RealtimeConfig(0.6, 0.6, 0.9, 0.05, True)
 
     thresholds = recommend_thresholds(
         background=background, known=known, unknown={}, config=config, library=library
@@ -129,7 +129,7 @@ def test_recommend_thresholds_without_unknown_does_not_claim_verified() -> None:
 def test_cli_frames_writes_only_realtime_config(tmp_path: Path, capsys) -> None:
     from tools.realtime_check import main
 
-    _write_images(tmp_path / "frames" / "background", GRAY, 6)
+    _write_images(tmp_path / "frames" / "background", GRAY, 12)
     _write_images(tmp_path / "frames" / "mouse", RED, 2)
     _write_images(tmp_path / "frames" / "unknown" / "剪刀", BLUE, 2)
 
@@ -141,7 +141,7 @@ def test_cli_frames_writes_only_realtime_config(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "realtime.json"
     from core.realtime_config import save_realtime_config
 
-    save_realtime_config(RealtimeConfig(0.6, 0.6, 0.9, True, 0.05), config_path)
+    save_realtime_config(RealtimeConfig(0.6, 0.6, 0.9, 0.05, True), config_path)
 
     # 没有真实 ResNet 权重时 main 会尝试加载默认编码器；这条用例只验证
     # 参数/写盘路径，所以 monkeypatch 掉编码器。
@@ -159,9 +159,9 @@ def test_cli_frames_writes_only_realtime_config(tmp_path: Path, capsys) -> None:
                 "--config",
                 str(config_path),
                 "--take",
-                "2",
+                "12",
                 "--drop-first",
-                "1",
+                "2",
                 "--write",
                 "--json",
             ]

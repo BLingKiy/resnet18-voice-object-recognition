@@ -161,15 +161,21 @@ def discover_frames(
 
 
 def _stats(values: Sequence[float | None]) -> dict[str, Any]:
-    """返回 min/mean/max/n，空列表时全部为 ``None``。"""
-    numbers = [float(value) for value in values if value is not None]
+    """返回 min/median/mean/max/n，空列表时全部为 ``None``。"""
+    numbers = sorted(float(value) for value in values if value is not None)
     if not numbers:
-        return {"n": 0, "min": None, "mean": None, "max": None}
+        return {"n": 0, "min": None, "median": None, "mean": None, "max": None}
+    middle = len(numbers) // 2
+    if len(numbers) % 2:
+        median = numbers[middle]
+    else:
+        median = (numbers[middle - 1] + numbers[middle]) / 2.0
     return {
         "n": len(numbers),
-        "min": round(min(numbers), 6),
+        "min": round(numbers[0], 6),
+        "median": round(median, 6),
         "mean": round(sum(numbers) / len(numbers), 6),
-        "max": round(max(numbers), 6),
+        "max": round(numbers[-1], 6),
     }
 
 
@@ -199,25 +205,25 @@ def _score_items(
             library,
             threshold=config.threshold_realtime,
             encoder=encoder,
-            background=background,
-            crop_margin=crop_margin,
+            bg_model=background,
+            bg_crop_margin=crop_margin,
         )
         effective, adopted = select_recognition(score, crop_margin)
-        if score.background_similarity is not None:
-            bg_values.append(float(score.background_similarity))
+        if score.bg_sim is not None:
+            bg_values.append(float(score.bg_sim))
         full_values.append(float(score.full.similarity))
         if score.crop is not None:
             crop_values.append(float(score.crop.similarity))
         effective_values.append(float(effective.similarity))
-        used_crop += int(adopted)
+        used_crop += int(adopted == "crop")
         is_correct = effective.is_known and effective.name == label
         correct += int(is_correct)
         rows.append(
             {
                 "image": name_for(index),
                 "bg": (
-                    round(float(score.background_similarity), 6)
-                    if score.background_similarity is not None
+                    round(float(score.bg_sim), 6)
+                    if score.bg_sim is not None
                     else None
                 ),
                 "full": round(float(score.full.similarity), 6),
@@ -229,7 +235,7 @@ def _score_items(
                 "effective": round(float(effective.similarity), 6),
                 "name": effective.name,
                 "is_known": bool(effective.is_known),
-                "used_crop": bool(adopted),
+                "used_crop": bool(adopted == "crop"),
                 "correct": bool(is_correct),
             }
         )
@@ -303,7 +309,7 @@ def evaluate_frames(
     if library.total_vectors == 0:
         raise ValueError("特征库为空：请先录入物体再自检")
 
-    margin = float(config.crop_margin if crop_margin is None else crop_margin)
+    margin = float(config.bg_crop_margin if crop_margin is None else crop_margin)
     bg_paths = list(frame_set.background)
     if limit is not None:
         bg_paths = bg_paths[: int(limit)]
@@ -322,15 +328,17 @@ def evaluate_frames(
     }
 
     background_model: BackgroundModel | None = None
-    if len(bg_paths) > drop_first:
+    if bg_paths:
         try:
-            background_model = BackgroundModel.learn(
+            candidate = BackgroundModel()
+            candidate.collect(
                 bg_paths,
-                encoder=encoder,
-                take=take,
+                n_frames=take,
                 drop_first=drop_first,
+                encoder=encoder,
             )
-            background["learned"] = background_model.frames_used
+            background_model = candidate
+            background["learned"] = candidate.frames_used
         except Exception as exc:  # noqa: BLE001 - 任何编码失败都写进报告，不中断整轮自检
             warnings.append(f"背景学习失败：{type(exc).__name__}: {exc}")
 
@@ -573,7 +581,7 @@ def format_report(report: dict[str, Any]) -> str:
     )
 
     lines.append("")
-    lines.append("== 背景相似度基线（均值/最大） ==")
+    lines.append("== 背景相似度基线（min / median / max） ==")
     for key, label in (
         ("bg_sim", "空场景（含学习帧）"),
         ("bg_sim_holdout", "空场景（留出帧）"),
@@ -581,8 +589,8 @@ def format_report(report: dict[str, Any]) -> str:
         stats = background[key]
         if stats["n"]:
             lines.append(
-                f"{label}: n={stats['n']} mean={stats['mean']:.4f} "
-                f"max={stats['max']:.4f} min={stats['min']:.4f}"
+                f"{label}: n={stats['n']} min={stats['min']:.4f} "
+                f"median={stats['median']:.4f} max={stats['max']:.4f}"
             )
         else:
             lines.append(f"{label}: 无数据")
@@ -590,8 +598,8 @@ def format_report(report: dict[str, Any]) -> str:
         stats = item["bg_sim"]
         if stats["n"]:
             lines.append(
-                f"物体「{name}」在场: n={stats['n']} mean={stats['mean']:.4f} "
-                f"max={stats['max']:.4f} min={stats['min']:.4f}"
+                f"物体「{name}」在场: n={stats['n']} min={stats['min']:.4f} "
+                f"median={stats['median']:.4f} max={stats['max']:.4f}"
             )
 
     lines.append("")
@@ -607,7 +615,7 @@ def format_report(report: dict[str, Any]) -> str:
         )
 
     lines.append("")
-    lines.append("== 物体在场分数分布（min / mean / max） ==")
+    lines.append("== 物体在场分数分布（min / median / max） ==")
     lines.append(
         f"{'物体':<12} {'n':>3} {'全帧':<24} {'中心裁剪':<24} {'采用':<24} 裁剪次数"
     )
@@ -615,7 +623,7 @@ def format_report(report: dict[str, Any]) -> str:
     def _fmt(stats: dict[str, Any]) -> str:
         if not stats["n"]:
             return "-"
-        return f"{stats['min']:.4f}/{stats['mean']:.4f}/{stats['max']:.4f}"
+        return f"{stats['min']:.4f}/{stats['median']:.4f}/{stats['max']:.4f}"
 
     for group_name, groups in (("已知", report["known"]), ("未知", report["unknown"])):
         for name, item in groups.items():
@@ -682,8 +690,8 @@ def _write_config(report: dict[str, Any], config: RealtimeConfig, path: Path) ->
             float(rt_value) if rt_value is not None else config.threshold_realtime
         ),
         threshold_bg=float(bg_value) if bg_value is not None else config.threshold_bg,
-        gate_enabled=config.gate_enabled,
-        crop_margin=config.crop_margin,
+        bg_crop_margin=config.bg_crop_margin,
+        bg_gate_enabled=config.bg_gate_enabled,
     )
     return save_realtime_config(updated, path)
 
@@ -821,16 +829,17 @@ def cmd_camera(args: argparse.Namespace) -> int:
         capture.release()
 
     try:
-        background_model = BackgroundModel.learn(
+        background_model = BackgroundModel()
+        background_model.collect(
             bg_frames,
-            encoder=encoder,
-            take=args.take,
+            n_frames=args.take,
             drop_first=args.drop_first,
+            encoder=encoder,
         )
     except Exception as exc:
         raise RuntimeError(f"背景学习失败：{exc}") from exc
 
-    margin = float(config.crop_margin if args.crop_margin is None else args.crop_margin)
+    margin = float(config.bg_crop_margin if args.crop_margin is None else args.crop_margin)
     bg_report = _score_items(
         bg_frames,
         library,

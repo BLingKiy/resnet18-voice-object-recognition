@@ -2,9 +2,8 @@
   "schema": "rn18-realtime-config",
   "version": 1,
   "threshold_static": 0.8124,
-  "threshold_realtime": 0.8124,
+  "threshold_realtime": 0.75,
   "threshold_bg": 0.9,
-  "gate_enabled": true,
-  "crop_margin": 0.05,
-  "notes": "threshold_realtime 尚未真机校准，暂等于已校准的 threshold_static(0.8124)；threshold_bg=0.90 是保守初值。两者都必须用 tools/realtime_check.py 在真机空场景/物体帧上校准，当前数字不是实时链路的结论。"
+  "bg_crop_margin": 0.05,
+  "bg_gate_enabled": true
 }

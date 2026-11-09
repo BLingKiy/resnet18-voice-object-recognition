@@ -135,6 +135,49 @@ def recognize_static(
 
 ---
 
+## 7b. `core.background.BackgroundModel.collect`（实时背景学习）
+
+**文件**：`core/background.py`
+
+```python
+def collect(
+    self,
+    frames: Iterable[np.ndarray],
+    n_frames: int = 20,
+    drop_first: int = 2,
+    *,
+    encoder: Encoder | None = None,
+) -> NDArray[np.float32]:
+```
+
+- **输入**：一段空场景帧（最多取 `n_frames` 帧，默认 20）、开头丢弃帧数（默认 2）。**输出**：512 维、L2 归一化的背景向量，并写入 `self.vector` 与 `self.sample_count`。
+- **为什么这样设计**：丢弃前 2 帧是因为摄像头首帧常是黑帧/过曝；对剩余帧逐维取中位数而不是均值，少量人走动/曝光跳变不会把背景整体拉偏；最后再归一化一次，背景相似度与物体检索都是余弦口径。丢弃预热帧后不足 10 帧直接报错，避免拿半截数据凑背景。背景只存 `data/background.json`，不写 `library.json`，不计入物体数。
+- **被抽问怎么答**：为什么用中位数？——对离群帧鲁棒。为什么不能把背景放进特征库？——背景不是物体，会污染物体数量和阈值校准。换教室怎么办？——点「重新学背景」，不改任何已录入物体。
+
+---
+
+## 7c. `core.pipeline.recognize_stream`（实时背景门 + 中心裁剪）
+
+**文件**：`core/pipeline.py`
+
+```python
+def recognize_stream(
+    frame, library, *,
+    threshold=None, encoder=None,
+    bg_model: BackgroundModel | None = None,
+    t_bg: float = 0.90,
+    t_rt: float = 0.75,
+    bg_gate_enabled: bool = True,
+    bg_crop_margin: float = 0.05,
+) -> StreamResult:
+```
+
+- **输入**：一帧画面、特征库、可选背景模型与三个实时阈值。**输出**：`StreamResult`，含 `recognition`、`annotated`、`state`（`known`/`unknown`/`no_object`）、`source`（`full`/`crop`）、`bg_sim`、`score`、`threshold_used`、`speech`。
+- **为什么这样设计**：参数全部是带默认值的关键字参数，旧调用点只传 `frame, library` 时 `bg_model=None`，完整退回旧单路识别；`bg_gate_enabled=False` 同样退回旧路径，用于现场对照。背景门命中时直接返回 `no_object`，不调用物体检索、不生成播报文本，`speech=""`。裁剪只在「裁剪分 - 全帧分 > margin」时采用，判未知统一用 `t_rt`，不套静态阈值 0.8124。
+- **被抽问怎么答**：为什么不直接套 0.8124？——静态图整幅都是物体，实时帧物体只占一部分，分数整体偏低；T_rt 必须真机校准。为什么门命中不检索？——背景不是物体，检索只会制造误报，还浪费一次前向。关闭开关后行为变吗？——不变，逐帧等价于 P5.1 之前。
+
+---
+
 ## 8. `voice.asr.asr`
 
 **文件**：`voice/asr.py`

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,6 @@ gr = pytest.importorskip("gradio")
 from helpers import DIM, color_encoder, one_hot, solid
 
 import app
-from core.background import load_background
 from core.library import FeatureLibrary, load_library
 from core.pipeline import BACKGROUND_LABEL
 from core.realtime_config import RealtimeConfig
@@ -107,8 +107,8 @@ def make_background_controller(
     tmp_path: Path,
     *,
     clock: FakeClock | None = None,
-    learn_frames: int = 3,
-    drop_first: int = 1,
+    learn_frames: int = 12,
+    drop_first: int = 2,
     gate_enabled: bool = True,
 ) -> app.RealtimeController:
     """构造带背景学习的控制器：背景文件放 tmp，阈值显式注入。"""
@@ -123,8 +123,8 @@ def make_background_controller(
             threshold_static=0.6,
             threshold_realtime=0.6,
             threshold_bg=0.9,
-            gate_enabled=gate_enabled,
-            crop_margin=0.05,
+            bg_crop_margin=0.05,
+            bg_gate_enabled=gate_enabled,
         ),
         learn_frames=learn_frames,
         drop_first=drop_first,
@@ -135,8 +135,8 @@ def _learn_background(
     controller: app.RealtimeController,
     color: tuple[int, int, int] = APPLE,
 ) -> None:
-    """喂够 drop_first + learn_frames 帧，让控制器学完背景。"""
-    needed = controller.drop_first + controller.learn_frames
+    """喂够 learn_frames 帧，让控制器学完背景（前 drop_first 帧只做预热）。"""
+    needed = controller.learn_frames
     for _ in range(needed):
         controller.process(solid(color))
     assert controller.background_ready is True
@@ -706,12 +706,20 @@ def test_background_learning_collects_frames_and_persists(
     _learn_background(controller, APPLE)
 
     assert controller.background is not None
-    assert controller.background.frames_used == controller.learn_frames
+    assert (
+        controller.background.sample_count
+        == controller.learn_frames - controller.drop_first
+    )
     assert "背景已建立" in controller.stats_text()
 
-    saved = load_background(tmp_path / "background.json")
-    assert saved is not None
-    assert saved.frames_used == controller.learn_frames
+    saved_raw = json.loads(
+        (tmp_path / "background.json").read_text(encoding="utf-8")
+    )
+    assert saved_raw["dim"] == DIM  # 假编码器是 8 维，生产链路是 512
+    assert saved_raw["sample_count"] == (
+        controller.learn_frames - controller.drop_first
+    )
+    assert "objects" not in saved_raw
     # 背景文件绝不能混进物体库。
     assert library.object_count == 1 and library.total_vectors == 1
 
