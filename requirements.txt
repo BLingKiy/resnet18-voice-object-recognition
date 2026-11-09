@@ -1,0 +1,14 @@
+# 核心依赖（必装）
+numpy>=1.23
+pillow>=10.0
+torch>=0.13
+torchvision>=0.13
+gradio>=4.0
+
+# 语音链路（可选：缺省则降级为键盘录入 + 文本结果显示）
+soundfile
+httpx
+edge-tts
+
+# 开发 / 测试
+pytest>=7.0

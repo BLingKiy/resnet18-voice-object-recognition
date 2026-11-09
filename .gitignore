@@ -1,0 +1,20 @@
+# 密钥与本地数据：绝不提交
+.env
+.env.*
+!.env.example
+
+# 特征库与图片数据集（本地生成，按需另行归档）
+data/
+*.features.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
