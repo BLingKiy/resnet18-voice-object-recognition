@@ -3,7 +3,9 @@ numpy>=1.23
 pillow>=10.0
 torch>=0.13
 torchvision>=0.13
-gradio>=4.0
+# 界面锁定 4.x：gr.Audio(autoplay=True) 与 stream_every 在 5.x 行为不同
+# （见 core/README.md 风险清单），不加上界时 pip 会装到 5.x/6.x 直接跑不起来。
+gradio>=4.0,<5.0
 
 # 语音链路（可选：缺省则降级为键盘录入 + 文本结果显示）
 soundfile
