@@ -200,7 +200,7 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q  # 含真实权重端到端
 **单元/集成测试**（本机实跑）：
 
 ```text
-170 passed, 5 skipped, 25 warnings in 9.53s
+170 passed, 5 skipped, 25 warnings in 8.67s
 ```
 
 **自检工具实跑（冒烟数据，不是校准结论）**：本机没有摄像头，也没有真正的"空场景"照片。为了验证工具流程，把 `~/.rn18/data/test` 的 10 张测试图裁出 30 个桌面角落作为"背景帧"（明确不是空场景实拍），物体帧仍用 5 类测试图，另加 2 类未知物体。命令：
