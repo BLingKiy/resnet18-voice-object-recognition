@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,13 @@ from PIL import Image
 import app
 from core.library import FeatureLibrary, load_library
 from core.recognize import Match, Recognition
-from voice import AsrAudioError, AsrDependencyError, AsrNotConfigured, BaiduAsrError
+from voice import (
+    AsrAudioError,
+    AsrDependencyError,
+    AsrNotConfigured,
+    BaiduAsrError,
+    TtsSynthesisError,
+)
 
 # 三种注册颜色都映射到同一类，用来模拟"同一物体多张图"。
 MULTI_VIEW_ENCODER = color_encoder(
@@ -211,8 +218,13 @@ def test_asr_button_is_disabled_and_hint_shown_without_keys(
 
     assert _find_button(demo, "语音识别名称").interactive is False
     audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
-    assert len(audios) == 1
-    assert "microphone" in audios[0].sources
+    # P4 之后界面有两个音频组件：Tab1 的麦克风输入 + Tab2 的播报播放器。
+    # 两者 sources 都含 microphone（Gradio 默认值），只能靠 autoplay 区分：
+    # 播报播放器必须自动播放，麦克风输入不能。
+    playback = [b for b in audios if getattr(b, "autoplay", False)]
+    inputs = [b for b in audios if not getattr(b, "autoplay", False)]
+    assert len(playback) == 1
+    assert len(inputs) == 1 and "microphone" in (inputs[0].sources or [])
     hints = [
         str(b.value)
         for b in demo.blocks.values()
@@ -361,3 +373,175 @@ def test_recognized_name_can_be_enrolled_through_keyboard_path(
     assert rows[0][0] == "鼠标。"
     assert rows[0][1] == "2"
     assert load_library(library.path).get("鼠标。") is not None
+
+
+# --------------------------------------------------------------------------- #
+# P4 语音播报：动态文本、失败提示与界面接线（edge-tts 全部 mock，不联网）
+# --------------------------------------------------------------------------- #
+def _enrolled_two_objects(tmp_path: Path) -> tuple[FeatureLibrary, Any]:
+    """建一个"苹果=RED、香蕉=YELLOW"的库，返回 (库, 编码器)。"""
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    encoder = color_encoder({RED: one_hot(0), YELLOW: one_hot(1)})
+    app.enroll_images(
+        "苹果",
+        [_save_solid(tmp_path / "apple.png", RED)],
+        library=library,
+        encoder=encoder,
+    )
+    app.enroll_images(
+        "香蕉",
+        [_save_solid(tmp_path / "banana.png", YELLOW)],
+        library=library,
+        encoder=encoder,
+    )
+    return library, encoder
+
+
+def test_speech_text_is_built_from_the_current_result() -> None:
+    """播报文本必须来自当次 Recognition，不是固定话术。"""
+    apple = Recognition(is_known=True, name="苹果", similarity=0.92, threshold=0.6)
+    banana = Recognition(is_known=True, name="香蕉", similarity=0.81, threshold=0.6)
+    unknown = Recognition(
+        is_known=False, name="未知物体", similarity=0.21, threshold=0.6
+    )
+
+    assert app.speech_text(apple) == "识别结果：苹果"
+    assert app.speech_text(banana) == "识别结果：香蕉"
+    assert app.speech_text(unknown) == "未知物体"
+    # 不同物体绝不能得到同一段播报文本。
+    assert app.speech_text(apple) != app.speech_text(banana)
+
+
+def test_recognize_and_speak_uses_each_recognition_text(tmp_path: Path) -> None:
+    """连续识别两个物体：每次合成的文本都跟着当次结果变化，音频路径也不同。"""
+    library, encoder = _enrolled_two_objects(tmp_path)
+    spoken: list[str] = []
+
+    def fake_synthesizer(text: str) -> str:
+        spoken.append(text)
+        path = tmp_path / f"speech_{len(spoken)}.mp3"
+        path.write_bytes(b"ID3fake")
+        return str(path)
+
+    headline_1, _, rows_1, audio_1, status_1 = app.recognize_and_speak(
+        solid(RED, (48, 48)),
+        library=library,
+        encoder=encoder,
+        synthesizer=fake_synthesizer,
+    )
+    headline_2, _, _, audio_2, status_2 = app.recognize_and_speak(
+        solid(YELLOW, (48, 48)),
+        library=library,
+        encoder=encoder,
+        synthesizer=fake_synthesizer,
+    )
+
+    assert "识别结果：苹果" in headline_1
+    assert "识别结果：香蕉" in headline_2
+    assert spoken == ["识别结果：苹果", "识别结果：香蕉"]
+    assert audio_1 is not None and audio_2 is not None
+    assert audio_1 != audio_2, "每次都必须是新文件，否则 gr.Audio 不会再次 autoplay"
+    assert "识别结果：苹果" in status_1 and "识别结果：香蕉" in status_2
+    assert rows_1[0][1] == "苹果"
+
+
+def test_unknown_result_is_spoken_as_unknown_label(tmp_path: Path) -> None:
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    app.enroll_images(
+        "苹果",
+        [_save_solid(tmp_path / "apple.png", RED)],
+        library=library,
+        encoder=MULTI_VIEW_ENCODER,
+    )
+    spoken: list[str] = []
+
+    def fake_synthesizer(text: str) -> str:
+        spoken.append(text)
+        return str(tmp_path / "unknown.mp3")
+
+    headline, _, _, audio, status = app.recognize_and_speak(
+        solid(YELLOW, (48, 48)),
+        library=library,
+        encoder=MULTI_VIEW_ENCODER,
+        synthesizer=fake_synthesizer,
+    )
+
+    assert "识别结果：未知物体" in headline
+    assert spoken == ["未知物体"]
+    assert audio is not None and "未知物体" in status
+
+
+def test_speech_failure_shows_network_hint_but_keeps_recognition(
+    tmp_path: Path,
+) -> None:
+    """断网/合成失败：界面明示提示、音频清空，但识别结果照常显示。"""
+    library, encoder = _enrolled_two_objects(tmp_path)
+
+    def offline_synthesizer(text: str) -> str:
+        raise TtsSynthesisError(
+            "语音合成失败（ClientConnectorError），请检查网络后重试。"
+        )
+
+    headline, annotated, rows, audio, status = app.recognize_and_speak(
+        solid(RED, (48, 48)),
+        library=library,
+        encoder=encoder,
+        synthesizer=offline_synthesizer,
+    )
+
+    assert "语音播报不可用，请检查网络" in status
+    assert "ClientConnectorError" in status  # 具体原因保留，便于现场排查
+    assert audio is None  # 不播放任何替代提示音
+    assert "识别结果：苹果" in headline  # 识别结果不受影响
+    assert isinstance(annotated, Image.Image)
+    assert rows[0][1] == "苹果"
+
+
+def test_unexpected_speech_error_is_contained(tmp_path: Path) -> None:
+    """播报链路的未预期异常也不能冒到 Gradio 变成红色堆栈。"""
+    library, encoder = _enrolled_two_objects(tmp_path)
+
+    def broken(text: str) -> str:
+        raise RuntimeError("driver crashed")
+
+    headline, _, _, audio, status = app.recognize_and_speak(
+        solid(RED, (48, 48)),
+        library=library,
+        encoder=encoder,
+        synthesizer=broken,
+    )
+
+    assert "语音播报不可用，请检查网络" in status
+    assert "RuntimeError" in status
+    assert audio is None
+    assert "识别结果：苹果" in headline
+
+
+def test_no_recognition_means_no_speech(tmp_path: Path) -> None:
+    """空图/空库没有可播报文本：不调用合成、不产生音频。"""
+    calls: list[str] = []
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+
+    headline, image, rows, audio, status = app.recognize_and_speak(
+        None, library=library, synthesizer=lambda text: calls.append(text) or "x.mp3"
+    )
+
+    assert "上传一张测试图片" in headline
+    assert audio is None and calls == [] and image is None and rows == []
+    assert "语音播报不可用" not in status
+
+
+def test_build_demo_wires_autoplay_speech_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = FeatureLibrary(path=tmp_path / "features.json", dim=DIM)
+    monkeypatch.setattr(app, "get_library", lambda: library)
+    monkeypatch.setattr(app, "is_asr_configured", lambda: False)
+
+    demo = app.build_demo()
+
+    audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
+    playback = [b for b in audios if getattr(b, "autoplay", False)]
+    assert len(playback) == 1
+    assert playback[0].interactive is False
+    assert _find_button(demo, "开始识别") is not None
