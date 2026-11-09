@@ -211,8 +211,9 @@ def test_asr_button_is_disabled_and_hint_shown_without_keys(
 
     assert _find_button(demo, "语音识别名称").interactive is False
     audios = [b for b in demo.blocks.values() if isinstance(b, gr.Audio)]
-    assert len(audios) == 1
-    assert "microphone" in audios[0].sources
+    # Tab1 的麦克风录音是唯一一个带 microphone 来源的音频组件；
+    # Tab2 的播报播放器只用于放音（见 test_app_tts.py）。
+    assert any("microphone" in audio.sources for audio in audios)
     hints = [
         str(b.value)
         for b in demo.blocks.values()

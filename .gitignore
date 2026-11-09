@@ -14,6 +14,8 @@ torchinductor_*/
 .torch-cache/
 .validation/
 acl-recovery/
+# Edge TTS 每次播报生成的 mp3（默认输出目录，见 RN18_TTS_DIR）
+.tts/
 
 # 编辑器 / 系统
 .idea/

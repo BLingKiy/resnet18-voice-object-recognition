@@ -1,4 +1,4 @@
-"""ResNet18 + 语音物体识别 Demo 的 Gradio 界面（P2 界面 + P3 语音录名接线）。
+"""ResNet18 + 语音物体识别 Demo 的 Gradio 界面（P2 界面 + P3 语音录名 + P4 语音播报）。
 
 本文件只做两件事：**界面布局**与**事件绑定**。所有视觉逻辑都复用 ``core``：
 
@@ -6,8 +6,11 @@
 - ``core.library``   —— JSON 特征库的加载、录入、保存
 - ``core.recognize`` —— 余弦相似度检索与未知物体判定
 
-语音只负责"说出物体名称 -> 回填名称框"，识别与相似度逻辑完全不动；
-没有配置百度密钥时按钮置灰，键盘录入路径保持原样可用。
+语音分两路，互不影响识别主流程：
+
+- 语音输入（``voice.asr``）：说出物体名称 -> 回填名称框；
+- 语音播报（``voice.tts``）：识别完成后播报当次结果，失败只显示
+  「语音播报不可用，请检查网络」，识别结果照常返回。
 
 启动::
 
@@ -19,6 +22,9 @@
     RN18_LIBRARY_PATH  # 特征库 JSON 路径，默认 data/features.json
     RN18_HOST          # 监听地址，默认 127.0.0.1（只给本机演示用）
     RN18_PORT          # 监听端口，默认 7860
+    RN18_TTS_DIR       # 播报音频输出目录，默认仓库内 .tts/
+    RN18_TTS_VOICE     # 音色，默认 zh-CN-XiaoxiaoNeural
+    RN18_TTS_COOLDOWN  # 实时播报冷却秒数，夹在 3~5 秒之间，默认 4
 
 说明：判定阈值当前是核心层里的**占位值**，最终必须由 P6 用未参与录入的
 测试图校准；界面会原样显示本次实际使用的阈值，不会把占位值包装成结论。
@@ -70,13 +76,16 @@ from core import (
 )
 from core.library import DEFAULT_LIBRARY_PATH
 from voice import (
+    TTS_UNAVAILABLE_MESSAGE,
     AsrAudioError,
     AsrDependencyError,
     AsrError,
     AsrNotConfigured,
     BaiduAsrError,
+    TtsError,
     asr,
     is_asr_configured,
+    synthesize,
 )
 
 _LOGGER = logging.getLogger("rn18.app")
@@ -469,6 +478,38 @@ def neighbor_rows(result: Recognition) -> list[list[str]]:
     ]
 
 
+def _recognize_core(
+    image: Any,
+    *,
+    library: FeatureLibrary | None = None,
+    encoder: Encoder | None = None,
+    top_k: int = 3,
+) -> tuple[Recognition | None, str, Image.Image | None, list[list[str]]]:
+    """识别一张图并返回 ``(结果对象, 结论 Markdown, 标注图, 近邻行)``。
+
+    静态识别与"识别 + 播报"共用这一份逻辑：播报需要 ``Recognition`` 对象
+    才能念出当次物体名，而界面展示只需要 Markdown。抽出来是为了避免两条
+    路径各自识别一次、得出两个结果。
+
+    失败或输入不合法时 ``结果对象`` 为 ``None``，其余字段是可展示的提示文案。
+    """
+    lib = library if library is not None else get_library()
+    if image is None:
+        return None, "⚠️ 请先上传一张测试图片。", None, []
+    if lib.total_vectors == 0:
+        return None, "⚠️ 特征库为空，请先在「多图录入」页录入物体。", None, []
+
+    try:
+        with _STORE_LOCK:
+            result = recognize(lib, image, top_k=top_k, encoder=encoder)
+        annotated = annotate_image(image, result)
+    except Exception as exc:
+        _LOGGER.exception("识别失败")
+        return None, f"❌ 识别失败：{type(exc).__name__}: {exc}", None, []
+
+    return result, format_headline(result), annotated, neighbor_rows(result)
+
+
 def recognize_image(
     image: Any,
     *,
@@ -476,7 +517,7 @@ def recognize_image(
     encoder: Encoder | None = None,
     top_k: int = 3,
 ) -> tuple[str, Image.Image | None, list[list[str]]]:
-    """Tab2 事件：识别一张图片并生成标注图与 Top-K 近邻表。
+    """Tab2 事件：识别一张图片并生成标注图与 Top-K 近邻表（不播报）。
 
     Args:
         image: 用户上传的图片（路径 / PIL / numpy）。
@@ -487,21 +528,95 @@ def recognize_image(
     Returns:
         ``(结论 Markdown, 标注图或 None, 近邻表格)``。
     """
-    lib = library if library is not None else get_library()
-    if image is None:
-        return "⚠️ 请先上传一张测试图片。", None, []
-    if lib.total_vectors == 0:
-        return "⚠️ 特征库为空，请先在「多图录入」页录入物体。", None, []
+    _, headline, annotated, rows = _recognize_core(
+        image, library=library, encoder=encoder, top_k=top_k
+    )
+    return headline, annotated, rows
 
+
+# --------------------------------------------------------------------------- #
+# Tab2：语音播报
+# --------------------------------------------------------------------------- #
+def announcement_text(result: Recognition) -> str:
+    """把识别结果转成播报话术。
+
+    Args:
+        result: 一次识别结果。
+
+    Returns:
+        已知物体返回 ``"识别结果：<名称>"``，未知返回 ``"未知物体"``。
+        文本必须来自**当次**识别结果，不能是固定话术或固定提示音。
+    """
+    return f"识别结果：{result.name}" if result.is_known else UNKNOWN_LABEL
+
+
+def speak_result(result: Recognition) -> tuple[str, str | None]:
+    """合成当次识别结果的播报音频，并把任何失败转成一句现场可读的提示。
+
+    播报是**附加**能力：合成失败只影响这一行状态与播放器，绝不向上抛异常，
+    调用方的识别结论、标注图、近邻表都已经生成好了。
+
+    Args:
+        result: 当次识别结果。
+
+    Returns:
+        ``(状态 Markdown, 音频路径)``。成功时路径指向刚合成的 mp3，
+        ``gr.Audio(autoplay=True)`` 收到新路径即自动播放；失败时为 ``None``，
+        同时清空上一次的播放器内容，避免旧音频被误认为本次播报。
+    """
+    text = announcement_text(result)
     try:
-        with _STORE_LOCK:
-            result = recognize(lib, image, top_k=top_k, encoder=encoder)
-        annotated = annotate_image(image, result)
-    except Exception as exc:
-        _LOGGER.exception("识别失败")
-        return f"❌ 识别失败：{type(exc).__name__}: {exc}", None, []
+        spoken = synthesize(text)
+    except TtsError as exc:
+        # 依赖缺失与断网在界面上是同一句话：现场只关心"播不出来"，
+        # 具体原因进日志，不把异常类型糊到学生脸上。
+        _LOGGER.warning("语音播报失败: %s", exc)
+        return f"⚠️ {TTS_UNAVAILABLE_MESSAGE}", None
+    except Exception as exc:  # noqa: BLE001 - 播报不允许打断识别主流程
+        _LOGGER.exception("语音播报出现未预期异常")
+        return f"⚠️ {TTS_UNAVAILABLE_MESSAGE}", None
 
-    return format_headline(result), annotated, neighbor_rows(result)
+    status = (
+        f"🔊 已播报：{spoken.text}  \n"
+        f"合成 **{spoken.elapsed_ms} ms** · 音频 **{spoken.duration_ms / 1000:.2f} s**"
+        f" · 音色 `{spoken.voice}`"
+    )
+    # 必须返回路径字符串：gr.Audio 的 postprocess 只认路径/元组，
+    # 传 {"value": ...} 会在服务端报 "Cannot process ... as Audio"。
+    return status, str(spoken.audio_path)
+
+
+def recognize_and_speak(
+    image: Any,
+    *,
+    library: FeatureLibrary | None = None,
+    encoder: Encoder | None = None,
+    top_k: int = 3,
+) -> tuple[str, Image.Image | None, list[list[str]], str, str | None]:
+    """Tab2 按钮事件：识别 + 播报当次结果。
+
+    静态链路每次都重新合成、重新播报，不做文本去重——用户连续点两次
+    「开始识别」，就该听到两次结果，节流只属于实时链路。
+
+    Args:
+        image: 用户上传的图片（路径 / PIL / numpy）。
+        library: 仅测试使用；``None`` 表示进程内共享特征库。
+        encoder: 仅测试使用；``None`` 表示真实的 ResNet18。
+        top_k: 展示前多少个近邻，界面固定 3。
+
+    Returns:
+        ``(结论 Markdown, 标注图, 近邻表格, 播报状态, 音频路径)``。
+    """
+    result, headline, annotated, rows = _recognize_core(
+        image, library=library, encoder=encoder, top_k=top_k
+    )
+    if result is None:
+        # 没识别出东西就不播报：播一句"未知物体"会把"没图/空库"误导成
+        # "识别成功但结果未知"。播报状态留空，识别提示保持可见。
+        return headline, annotated, rows, "", None
+
+    status, audio_path = speak_result(result)
+    return headline, annotated, rows, status, audio_path
 
 
 # --------------------------------------------------------------------------- #
@@ -603,6 +718,16 @@ def build_demo() -> gr.Blocks:
                         interactive=False,
                     )
 
+            tts_status = gr.Markdown(
+                "识别后会语音播报当次结果（Edge TTS，需联网）。"
+            )
+            broadcast_audio = gr.Audio(
+                label="语音播报（识别后自动播放）",
+                type="filepath",
+                autoplay=True,
+                interactive=False,
+            )
+
             neighbor_table = gr.Dataframe(
                 headers=NEIGHBOR_HEADERS,
                 datatype=["str", "str", "str", "str", "str"],
@@ -612,10 +737,18 @@ def build_demo() -> gr.Blocks:
                 label="前 3 个近邻（图片级检索）",
             )
 
+            # 识别与播报在同一次事件里完成：先出结果，再合成音频。
+            # 播报失败只更新状态行，不影响上面已经返回的识别结果。
             recognize_button.click(
-                recognize_image,
+                recognize_and_speak,
                 inputs=[query_image],
-                outputs=[headline, annotated_image, neighbor_table],
+                outputs=[
+                    headline,
+                    annotated_image,
+                    neighbor_table,
+                    tts_status,
+                    broadcast_audio,
+                ],
             )
 
         gr.Markdown(
