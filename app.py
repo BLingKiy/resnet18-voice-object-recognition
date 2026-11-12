@@ -783,7 +783,7 @@ class RealtimeController:
             Path(config_path).expanduser() if config_path is not None else None
         )
         # 兼容旧测试：只有显式给了 background_path（界面就是这么传的）才自动
-        # 学背景；否则保持 rc1 的单路行为，避免 141 条旧用例被迫等 20 帧。
+        # 学背景；否则保持未启用背景门时的单路行为，避免 141 条旧用例被迫等 20 帧。
         if config is not None:
             self.config = config
         elif self._config_path is not None:
@@ -890,7 +890,7 @@ class RealtimeController:
         """背景学习/背景门状态的一行中文说明。"""
         with self._lock:
             if not self.gate_enabled:
-                return "背景门关（rc1 对照）"
+                return "背景门关（单路对照）"
             if self.background_error:
                 return f"背景学习失败：{self.background_error}"
             if self.background_learning:
@@ -909,7 +909,7 @@ class RealtimeController:
         if self.background_error:
             return (
                 f"❌ 背景学习失败：{self.background_error}  \n"
-                "请点「重新学背景」重试；在此期间实时识别退回 rc1 单路行为。"
+                "请点「重新学背景」重试；在此期间实时识别与未启用背景门时行为一致。"
             )
         used = self._background_used_frames_locked()
         if self.background_learning:
@@ -994,10 +994,10 @@ class RealtimeController:
             return self._last_headline, self.stats_text()
 
     def set_gate_enabled(self, enabled: bool) -> tuple[str, str]:
-        """开关背景门；关闭后实时链路退回 rc1 的单路识别行为。
+        """开关背景门；关闭后实时链路与未启用背景门时行为一致。
 
         Args:
-            enabled: ``True`` 启用背景门 + 中心裁剪，``False`` 退回 rc1。
+            enabled: ``True`` 启用背景门 + 中心裁剪，``False`` 与未启用背景门时行为一致。
 
         Returns:
             ``(结论 Markdown, 统计行)``。
@@ -1019,7 +1019,7 @@ class RealtimeController:
                 )
             else:
                 self._last_headline = (
-                    "### 背景门已关闭\n\n行为退回 rc1：每帧直接检索，"
+                    "### 背景门已关闭\n\n与未启用背景门时行为一致：每帧直接检索，"
                     "不做背景剔除与中心裁剪（便于现场对照）。"
                 )
             return self._last_headline, self.stats_text()
@@ -1593,7 +1593,7 @@ def relearn_background() -> tuple[str, str]:
 
 
 def set_background_gate(enabled: bool) -> tuple[str, str]:
-    """Tab3「背景门」开关事件：关闭后实时链路退回 rc1 行为。"""
+    """Tab3「背景门」开关事件：关闭后实时链路与未启用背景门时行为一致。"""
     return get_realtime().set_gate_enabled(enabled)
 
 
@@ -2036,7 +2036,7 @@ def build_demo() -> gr.Blocks:
                     with gr.Row():
                         relearn_bg_button = gr.Button("重新学背景（对准空场景）")
                         gate_toggle = gr.Checkbox(
-                            label="背景门（关闭 = 退回 rc1 对照）",
+                            label="背景门（关闭 = 单路对照）",
                             value=realtime.gate_enabled,
                         )
                     gr.Markdown(

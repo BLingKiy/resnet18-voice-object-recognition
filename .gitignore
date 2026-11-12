@@ -27,11 +27,13 @@ acl-recovery/
 .env
 .env.local
 
-# 数据集：图片与特征库全部留在本地，只提交可复核的清单。
+# 运行时数据：只提交空库骨架、实时配置与可复核的清单；真实向量与图片留在本地。
+# 报告样本图片放在 samples/（仅用于复现，不自动入库），不受 data/* 影响。
 # 用 data/* 而不是 data/：父目录被整体忽略后，!data/manifest.csv 无法再放行。
 data/*
 !data/manifest.csv
 !data/realtime.json
+!data/features.json
 
 # pytest 自定义 --basetemp 产物
 pytest-of-*/

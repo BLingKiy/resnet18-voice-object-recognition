@@ -163,7 +163,7 @@ def test_background_gate_miss_still_recognizes(library: FeatureLibrary) -> None:
     assert result.bg_similarity == pytest.approx(0.0, abs=1e-6)
 
 
-def test_gate_disabled_is_byte_identical_to_rc1(library: FeatureLibrary) -> None:
+def test_gate_disabled_is_byte_identical_to_no_gate(library: FeatureLibrary) -> None:
     frame = solid(BLUE, (80, 60))
     background = BackgroundModel(vector=one_hot(0), sample_count=18)
 

@@ -67,6 +67,8 @@ for row in library.stats():
 
 ## JSON 格式（版本 1）
 
+> 交付包内 `data/features.json` 是**空库**：保留 `schema` / `model` / `threshold` 等字段，`objects` 为空、`updated_at` 为空，不含任何向量。下方 JSON 只是字段格式示例（含一个物体与向量），不是交付包的实际内容。程序启动只加载这个空库，不扫描 `samples/` 样本图；首次使用需手动录入。
+
 ```json
 {
   "schema": "hifox-resnet18-feature-library",

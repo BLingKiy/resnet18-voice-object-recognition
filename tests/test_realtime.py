@@ -747,7 +747,7 @@ def test_background_gate_hit_does_not_retrieve_or_speak(
     assert "T_rt" in outcome.stats and "T_bg" in outcome.stats
 
 
-def test_gate_switch_off_returns_to_rc1_behavior(
+def test_gate_switch_off_matches_no_gate_behavior(
     library: FeatureLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spoken: list[str] = []

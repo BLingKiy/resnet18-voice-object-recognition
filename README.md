@@ -1,34 +1,57 @@
 # ResNet18 语音物体识别 Demo
 
-基于本地 ImageNet 预训练 **ResNet18** 的物体识别 Demo：多图录入并保存特征，输入图片返回最相似物体与相似度，相似度过低判为未知；带简单界面（录入 / 识别 / 查看），重启后特征库仍在。语音链路由百度短语音识别与 Edge TTS 播报组成；界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入。摄像头实时识别为加分项。
+基于本地 ImageNet 预训练 **ResNet18** 的物体识别 Demo：多图录入并保存特征（带物体名称），输入图片返回最相似物体名称与相似度，相似度过低判为未知物体；带简单界面（录入 / 识别 / 查看），重启后特征库仍在。语音链路由百度短语音识别与 Edge TTS 播报组成；界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入。摄像头实时识别为加分项。
 
-> 运行结束重启后，特征库 JSON 仍在，无需重新录入。
-> 课程数据默认放在 `~/.rn18/data/`（Windows 为 `%USERPROFILE%\.rn18\data\`）：`known/<物体名>/`（注册图，每物体 5 张）、`test/<物体名>/`（测试图，每物体 2 张，与注册图严格分开）、`unknown/<物体名>/`（未录入物体，3 类各 2 张，只用于校准）。图片与特征库都不入库，只有 `data/manifest.csv` 清单随仓库提交。
+> **交付包默认空库**：`data/features.json` 的 `objects` 为空、不含任何 512 维向量。程序启动不会载入预置向量，也不会扫描样本目录；第一次打开需要先现场录入物体，这正好对应选题书现场演示的第一项。
+>
+> 报告样本 41 张图放在 `samples/`（`known/` 25、`test/` 10、`unknown/` 6），**仅用于报告复现，不自动入库**，启动流程不读取它们。
 
 ## 为什么有这个项目
 
 作业要求做一个"能认东西"的本地 Demo，但不能依赖在线识别接口、服务器或手机 App。我们选择 ResNet18 取 512 维特征 + 余弦相似度：模型本地跑、特征库就是一个 JSON 文件，**零部署、可离线、重启不丢数据**。语音识别只用百度短语音识别（录入名称），语音播报用 Edge TTS；缺密钥或依赖时降级为纯键盘操作。
 
-## 快速开始（到"能跑"的最短路径）
+## 首次使用：在空库上现场录入（三步）
+
+交付包的特征库是空的。你的**第一步是在空库上现场录入一个新物体**；下面三步就是到"能识别"的最短路径。
+
+### 第 1 步 · 空库启动，确认是 0
 
 ```bash
-# 1. 准备环境（Python 3.10+，CPU 版 torch）
-python -m venv .venv && .venv\Scripts\activate      # Windows
-pip install -r requirements.txt
-
-# 2. 录入物体（每个物体 5 张以上，目录结构 ~/.rn18/data/known/<物体名>/*.jpg）
-python tools/demo_cli.py add --name water_cup --dir ~/.rn18/data/known/water_cup
-
-# 3. 识别一张测试图（首次运行会联网下载约 45 MB 的 ResNet18 权重，之后离线可用）
-python tools/demo_cli.py recognize --image ~/.rn18/data/test/water_cup/01.jpg --top-k 3
+python tools/demo_cli.py stats
 ```
 
-启动图形界面：
+预期输出（物体数 / 向量数都是 0）：
+
+```text
+特征库: data/features.json
+模型: resnet18-imagenet1k-v1  dim=512  阈值=0.8124
+物体数: 0   特征向量: 0
+（空库，请先用 add 命令录入物体）
+```
+
+图形界面同理：`python app.py` 后打开 Tab1，表格为空。
+
+### 第 2 步 · 现场录入一个新物体（每个 ≥5 张，多角度）
+
+用你手边任意一个小物体，从 5 个不同角度各拍一张，放进一个目录（例如 `my_object/`），然后：
 
 ```bash
-python app.py
-# 浏览器打开 http://127.0.0.1:7860
+python tools/demo_cli.py add --name 我的水杯 --dir my_object
 ```
+
+或在 Tab1 输入名称、上传多张图片、点「录入并保存」。预期：`新增 5 条特征`、`全库 5 条`。重复图片按像素摘要自动去重，不会虚增条数。想快速复现课程数据，也可以把 `samples/known/water_cup`（5 张注册图）当作录入来源。
+
+### 第 3 步 · 识别 / 未知判断
+
+换一个角度另拍一张作测试图，或直接用 `samples/test/water_cup/01.jpg`：
+
+```bash
+python tools/demo_cli.py recognize --image my_object_test.jpg --top-k 3
+```
+
+预期：显示物体名、相似度（含百分比）、是否已知，以及前 3 个近邻。再拿一个没录入的东西试一次，最高相似度低于阈值就显示「未知物体」。
+
+> 阈值 `0.8124` 是**课程 5 物体样本上校准的参考值**，不是通用常数。你现场录入的物体若与课程样本差异较大，建议用 `tools/calibrate.py` 以你自己的测试图重新校准（见「阈值与未知判断」）。
 
 ## 环境安装
 
@@ -57,6 +80,15 @@ pip install soundfile httpx edge-tts
 > `%USERPROFILE%\.cache\torch\hub\checkpoints\`（Windows）；
 > 也可设置环境变量 `TORCH_HOME` 指向可写目录。文件名必须与 torchvision 期望的一致（默认即 `resnet18-f37072fd.pth`）。
 
+## 启动图形界面
+
+```bash
+python app.py
+# 浏览器打开 http://127.0.0.1:7860
+```
+
+界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入（加分项）。
+
 ## 演示前检查
 
 答辩与现场演示前逐条过一遍，任何一条不过就会当场掉链子：
@@ -72,24 +104,24 @@ pip install soundfile httpx edge-tts
 ### 命令行（验收与批处理）
 
 ```bash
-# 逐个物体录入（目录或显式文件列表）
-python tools/demo_cli.py add --library ~/.rn18/data/features.json --name power_bank --dir ~/.rn18/data/known/power_bank
-python tools/demo_cli.py add --library ~/.rn18/data/features.json --name earphone   --dir ~/.rn18/data/known/earphone
+# 逐个物体录入（默认写仓库内 data/features.json）
+python tools/demo_cli.py add --name power_bank --dir samples/known/power_bank
+python tools/demo_cli.py add --name earphone   --dir samples/known/earphone
 
 # 查看特征库（物体数 / 向量条数 / 阈值）
-python tools/demo_cli.py stats --library ~/.rn18/data/features.json
+python tools/demo_cli.py stats
 
 # 单图识别，展示前 3 个近邻
-python tools/demo_cli.py recognize --library ~/.rn18/data/features.json --image ~/.rn18/data/test/power_bank/01.jpg --top-k 3
+python tools/demo_cli.py recognize --image samples/test/power_bank/01.jpg --top-k 3
 
-# 批量 Top-1 评测（目录结构 data/test/<物体名>/*.jpg）
-python tools/demo_cli.py eval --library ~/.rn18/data/features.json --dir ~/.rn18/data/test --json
+# 批量 Top-1 评测（目录结构 samples/test/<物体名>/*.jpg）
+python tools/demo_cli.py eval --dir samples/test --json
 
 # 阈值校准（见下方"阈值与未知判断"）
-python tools/calibrate.py --library ~/.rn18/data/features.json --known-dir ~/.rn18/data/test --unknown-dir ~/.rn18/data/unknown
+python tools/calibrate.py --known-dir samples/test --unknown-dir samples/unknown
 ```
 
-> 特征库默认路径是仓库内 `data/features.json`；用 `--library` 或环境变量 `RN18_LIBRARY_PATH` 指向 `~/.rn18/data/features.json` 即可复用已校准的库。两者必居其一，不要混用。
+> 特征库默认路径是仓库内 `data/features.json`（交付包为空库）。用 `--library` 或环境变量 `RN18_LIBRARY_PATH` 可指向其它文件；一台机器上只用一个库，不要混用。
 
 所有命令都支持 `--json`，便于把结果贴进报告或做自动化断言。
 
@@ -107,7 +139,7 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q   # 含真实权重端到端
 - **Tab1 · 多图录入**：输入物体名称（键盘或语音回填）→ 上传该物体的多张图片 → 点「录入并保存」。重复图片按像素摘要去重，不会虚增向量条数。
 - **Tab2 · 单图识别**：上传一张测试图 → 点「开始识别」。页面显示物体名、相似度（含百分比）、是否未知，以及前 3 个近邻和标注图（绿框=已知，红框=未知）；识别成功后自动播报当次结果。
 - **Tab3 · 实时识别（加分项）**：打开摄像头后画面按约 0.3 s/帧送入 `recognize_stream`，实时叠加名称与相似度，未知显示「未知物体」；TTS 按「结果变化 + 4 s 冷却」播报。没有摄像头时可上传预置帧序列模拟视频流。
-- **Tab3 · 背景自适应（P5.1）**：首次进入实时页先收集 **20** 帧（其中前 **2** 帧只做预热）建立当前机位背景，统计行显示学习进度与「背景已建立」；之后每帧先过背景门，命中显示「画面中没有可识别物体（背景）」，不检索、不播报。可点「重新学背景」重来，也可关掉「背景门」退回旧单路行为做对照。背景只写 `data/background.json`，不进入物体库。用预置帧序列做**实时识别**时请至少准备 20 张；「用帧序列抓 5 帧」教学入口走自己的预热逻辑，不受这 20 张限制。
+- **Tab3 · 背景自适应（P5.1）**：首次进入实时页先收集 **20** 帧（其中前 **2** 帧只做预热）建立当前机位背景，统计行显示学习进度与「背景已建立」；之后每帧先过背景门，命中显示「画面中没有可识别物体（背景）」，不检索、不播报。可点「重新学背景」重来，也可关掉「背景门」回到未启用背景门时的单路行为做对照。背景只写 `data/background.json`，不进入物体库。用预置帧序列做**实时识别**时请至少准备 20 张；「用帧序列抓 5 帧」教学入口走自己的预热逻辑，不受这 20 张限制。
 - **Tab3 · 教学式录入**：点「教它」→ 先丢 2 帧预热 → 按 0.2 s 以上间隔抓 5 帧 → 录音说名称 → ASR 回填（可键盘修改）→ 确认入库。入库复用 `add_to_library` / `save_library`，重启后仍在；教学期间识别与 TTS 同时暂停，退出时清空冷却计时。
 - **刷新特征库**：从磁盘重新读取 `data/features.json`，用于验证"重启后特征库仍在"。
 
@@ -148,9 +180,11 @@ BAIDU_ASR_DEV_PID=1537
 
 ## 阈值与未知判断（重要）
 
-判定规则：**最高相似度 < 阈值** 即判为"未知物体"。本项目阈值已用未参与录入的图片校准为 **`0.8124`**，并写进特征库 JSON 的 `threshold` 字段，程序启动时自动生效。
+判定规则：**最高相似度 < 阈值** 即判为"未知物体"。交付包 `data/features.json` 的 `threshold` 字段为 **`0.8124`**，程序启动时自动生效。
 
-校准依据：两条分布的实际数值（`data/test` 10 张已知 + `data/unknown` 6 张未知）
+> `0.8124` 是在**课程 5 物体样本**上、用未参与录入的测试图校准得到的**参考值**（推导见 REPORT.md §3）。交付包默认空库；你现场录入的物体若与课程样本差异较大，建议用 `tools/calibrate.py` 以你自己的测试图重新校准，不要把这个数当成通用常数。
+
+校准依据（课程样本复跑）：两条分布的实际数值（`samples/test` 10 张已知 + `samples/unknown` 6 张未知）
 
 | 分布 | 样本数 | min | max | mean |
 |------|-------|-----|-----|------|
@@ -159,23 +193,24 @@ BAIDU_ASR_DEV_PID=1537
 
 两条分布间隙 0.1407，取中点 `(0.8828 + 0.7421) / 2 = 0.8124`，两侧余量各约 0.070。写入后复跑：已知 10/10 通过（准确率 100%），未知 6/6 拒识（误报率 0%）。
 
-注意区分两个值：
+注意区分三类值：
 
-- `features.json` 里的 `threshold = 0.8124` 是**校准结果**，程序优先用它；
-- `core/recognize.py` 的 `DEFAULT_THRESHOLD = 0.60` 只是**库没有校准值时的兜底**，不是本项目的结论。用 `python tools/demo_cli.py threshold` 可以查看当前生效值。
+- `features.json` 里的 `threshold = 0.8124` 是课程样本上的校准**参考值**，程序优先用它；
+- `core/recognize.py` 的 `DEFAULT_THRESHOLD = 0.60` 只是**库没有校准值时的代码兜底**，不是本项目的结论，报告结论里不出现它。用 `python tools/demo_cli.py threshold` 可以查看当前生效值；
+- `data/realtime.json` 的 `threshold_realtime = 0.75`、`threshold_bg = 0.90`、`bg_crop_margin = 0.05` 是**未在标准流程下校准的占位值**，不是结论。
 
 重新校准（换数据或换角度重拍后）：
 
 ```bash
 # 1. 看两条分布，读建议阈值
-python tools/calibrate.py --known-dir ~/.rn18/data/test --unknown-dir ~/.rn18/data/unknown
+python tools/calibrate.py --known-dir samples/test --unknown-dir samples/unknown
 
 # 2. 写回特征库
-python tools/demo_cli.py threshold --library ~/.rn18/data/features.json --set 0.8124
+python tools/demo_cli.py threshold --set 0.8124
 
 # 3. 复跑两组验证
-python tools/demo_cli.py eval --library ~/.rn18/data/features.json --dir ~/.rn18/data/test --json
-python tools/unknown_check.py --library ~/.rn18/data/features.json --dir ~/.rn18/data/unknown
+python tools/demo_cli.py eval --dir samples/test --json
+python tools/unknown_check.py --dir samples/unknown
 ```
 
 > **校准集纪律**：校准只能用 `test/` 与 `unknown/`，注册图（`known/`）绝不允许进校准集，否则阈值会自己污染自己。本次三类样本 md5 两两零重叠。
@@ -197,23 +232,23 @@ flowchart LR
     H --> I
 ```
 
-- 背景学习：进实时页后收集 20 帧，丢前 2 帧（黑帧/过曝），对剩余 18 帧逐维取**中位数**再 L2 归一化；写入 `data/background.json`，**绝不写进 `library.json`**。丢弃预热帧后不足 10 帧时直接报错，不拿半截数据凑。
+- 背景学习：进实时页后收集 20 帧，丢前 2 帧（黑帧/过曝），对剩余 18 帧逐维取**中位数**再 L2 归一化；写入 `data/background.json`，**绝不写进 `features.json`**。丢弃预热帧后不足 10 帧时直接报错，不拿半截数据凑。
 - 背景门：每帧先算与背景的余弦；`bg_sim > T_bg` 判为「画面中没有可识别物体」，直接返回 `state="no_object"`，不进入检索、不产生播报文本。
 - 中心裁剪：PIL 裁 `0.2~0.8` 的中心 60%，只有「裁剪分 - 全帧分 > `bg_crop_margin`」才采用；结果里用 `source=full|crop` 标记。
 - 实时阈值：用 `T_rt` 判未知，**不套用静态阈值 0.8124**；静态链路完全不变。
-- 关闭开关：`realtime.json` 的 `bg_gate_enabled=false`（或界面「背景门」复选框）时，`recognize_stream` 退回 P5.1 之前的单路识别（全帧 + 库内静态阈值），标注图字节不变，便于现场对照。
+- 关闭开关：`realtime.json` 的 `bg_gate_enabled=false`（或界面「背景门」复选框）时，`recognize_stream` 回到 P5.1 之前的单路识别（全帧 + 库内静态阈值），标注图字节不变，便于现场对照。
 
 三个阈值分开存，静态阈值仍以特征库为准：
 
 | 键 | 当前值 | 来源 / 状态 |
 |----|--------|-------------|
-| `threshold_static` | **0.8124** | P6b 用未参与录入的测试图校准，写进 `features.json`；**保持不变** |
-| `threshold_realtime` | **0.75（占位）** | **待真机校准**：实时帧物体占比小、分数整体偏低，0.75 只是低于静态阈值的保守占位；**没有把 0.8124 搬过来** |
-| `threshold_bg` | **0.90（占位）** | **待真机校准**：空场景/物体帧分布确定前，先用高阈值避免把物体误门掉 |
-| `bg_crop_margin` | **0.05（占位）** | **待真机校准**：裁剪结果至少比全帧高 0.05 才采用 |
-| `bg_gate_enabled` | **true** | 背景门开关；`false` 退回旧单路，便于对照 |
+| `threshold_static` | **0.8124** | 课程样本上校准的参考值，写进 `features.json`；**保持不变** |
+| `threshold_realtime` | **0.75（占位）** | **未在标准流程下校准**：实时帧物体占比小、分数整体偏低，0.75 只是低于静态阈值的保守占位；**没有把 0.8124 搬过来** |
+| `threshold_bg` | **0.90（占位）** | **未在标准流程下校准**：空场景/物体帧分布确定前，先用高阈值避免把物体误门掉 |
+| `bg_crop_margin` | **0.05（占位）** | **未在标准流程下校准**：裁剪结果至少比全帧高 0.05 才采用 |
+| `bg_gate_enabled` | **true** | 背景门开关；`false` 回到未启用背景门时的单路行为，便于对照 |
 
-配置文件 `data/realtime.json`（与 `library.json` 并列）：
+配置文件 `data/realtime.json`（与 `features.json` 并列）：
 
 ```json
 {
@@ -227,7 +262,7 @@ flowchart LR
 }
 ```
 
-> 注意：`threshold_static` 即使写在文件里，程序读配置时仍会用 `features.json` 的 `threshold` 覆盖它，避免两处数字打架。`threshold_realtime` / `threshold_bg` / `bg_crop_margin` 当前值**不是校准结论**，报告里必须保留「待真机校准」标注。
+> 注意：`threshold_static` 即使写在文件里，程序读配置时仍会用 `features.json` 的 `threshold` 覆盖它，避免两处数字打架。`threshold_realtime` / `threshold_bg` / `bg_crop_margin` 当前值**不是校准结论**，报告里保留「未验证/占位」标注。
 
 真机自检（一条命令给出背景基线、空场景最大误报分、物体分数分布与阈值是否合理）：
 
@@ -243,16 +278,16 @@ python tools/realtime_check.py --camera 0 --seconds 30 \
 
 输出包含：空场景 `bg_sim` 的 min/median/max、空场景最高候选分与超过 `T_rt` 的误报次数、每个物体在场时的分数 min/median/max、当前三个阈值以及 `T_bg`/`T_rt` 是否可分的判定。
 
-`--camera` 模式需要 `pip install opencv-python`（**仅自检脚本**需要，应用本身不依赖 opencv；没有摄像头/没装 opencv 时脚本会给出明确报错并建议改用 `--frames`，不会静默卡住）。`--write` 只写 `data/realtime.json`，不动 `library.json`；两分布重叠时脚本**不给数字**，直接要求重拍，避免把拍脑袋的值写进配置。
+`--camera` 模式需要 `pip install opencv-python`（**仅自检脚本**需要，应用本身不依赖 opencv；没有摄像头/没装 opencv 时脚本会给出明确报错并建议改用 `--frames`，不会静默卡住）。`--write` 只写 `data/realtime.json`，不动 `features.json`；两分布重叠时脚本**不给数字**，直接要求重拍，避免把拍脑袋的值写进配置。
 
 ## 数据与特征库格式
 
-- 注册图：`~/.rn18/data/known/<物体名>/*.jpg`（每物体 5 张；`power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
-- 测试图：`~/.rn18/data/test/<物体名>/*.jpg`（每物体 2 张，与注册图严格分开，不参与录入）
-- 未知样本：`~/.rn18/data/unknown/<物体名>/*.jpg`（3 类各 2 张：乌龙茶、充电头、剪刀，只用于阈值校准）
-- 规模：5 物体 × 7 张（5 注册 + 2 测试）= 35 张，另加 3 类未知 × 2 张 = 6 张，合计 41 张
-- 清单：`data/manifest.csv` 是**唯一入库清单**，35 行 = 25 张 known + 10 张 test，按**文件字节 SHA-256** 去重，35 个摘要全不相同（CSV 第 4 列列名沿用 `md5`，实际值为 SHA-256）
-- 特征库：JSON，版本 1，512 维，L2 归一化，25 条向量，约 300 KB；原子写入，重启不丢
+- 注册图：`samples/known/<物体名>/*.jpg`（每物体 5 张；`power_bank` / `water_cup` / `earphone` / `keyboard` / `mouse`）
+- 测试图：`samples/test/<物体名>/*.jpg`（每物体 2 张，与注册图严格分开，不参与录入）
+- 未知样本：`samples/unknown/<物体名>/*.jpg`（3 类各 2 张：乌龙茶、充电头、剪刀，只用于阈值校准）
+- 规模：5 物体 × 7 张（5 注册 + 2 测试）= 35 张，另加 3 类未知 × 2 张 = 6 张，合计 41 张；**仅用于报告复现，启动不读取、不自动入库**
+- 清单：`data/manifest.csv` 是课程样本的**唯一入库清单**，35 行 = 25 张 known + 10 张 test，按**文件字节 SHA-256** 去重，35 个摘要全不相同（CSV 第 4 列列名沿用 `md5`，实际值为 SHA-256）。路径列沿用采集时的 `data/...`，对应本包 `samples/...`；哈希按文件字节计算，改名或移动后仍可核对。
+- 特征库：`data/features.json`，JSON，版本 1，512 维，L2 归一化；**交付包为空库（0 物体、0 条向量）**，原子写入，重启不丢
 - 实时背景：`data/background.json`，独立 schema `rn18-background`，只存 512 维背景向量；删掉它只会让实时页重新学背景，不影响物体库
 - 实时配置：`data/realtime.json`，存 `threshold_static` / `threshold_realtime` / `threshold_bg` / `bg_crop_margin` / `bg_gate_enabled`；`threshold_static` 的真值仍以 `features.json` 为准
 
@@ -261,7 +296,9 @@ python tools/realtime_check.py --camera 0 --seconds 30 \
 - [项目报告 REPORT.md](REPORT.md) — 系统功能 / 实现方法 / 测试结果 / 成员分工
 - [关键函数讲解卡 docs/function_cards.md](docs/function_cards.md) — 抽问高频函数说明
 - [现场演示脚本 docs/demo_script.md](docs/demo_script.md) — 验收演示分步清单
+- [启动说明 docs/STARTUP.md](docs/STARTUP.md) — 环境安装 + 启动命令速查
 - 核心层说明见 [core/README.md](core/README.md)
+- [报告样本说明 samples/README.md](samples/README.md) — 41 张样本的用途与不自动入库声明
 
 ## 许可证
 
