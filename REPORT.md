@@ -185,7 +185,7 @@ python -m pytest tests -q                     # 178 passed, 4 skipped（P5.1 实
 RUN_RESNET_TESTS=1 python -m pytest tests -q  # 含真实权重端到端
 ```
 
-- 环境：Python 3.11.9 / torch 2.2.2+cpu / torchvision 0.17.2 / numpy 1.26.4（pytest 机）；应用依赖仍按 README 锁 Gradio 4.x。真实权重端到端用例默认跳过，未在本机联网下载权重。
+- 环境：Python 3.11.9（`setup_env.bat` 在 `.venv` 中实跑）/ torch 2.2.2+cpu / torchvision 0.17.2+cpu / numpy 1.26.4 / gradio 4.44.1。应用依赖在 `requirements.txt` 中全部钉死版本（含 5 个传递依赖），与 README 「环境安装」锁定表一致。真实权重端到端用例默认跳过，未在本机联网下载权重。
 - 默认运行跳过 4 项：3 项真实 ResNet 端到端用例（需 `RUN_RESNET_TESTS=1`）、1 项真实 Edge TTS 联网用例（需 `RN18_TTS_LIVE=1`）。
 - 新增覆盖：`test_background.py`（20 帧丢 2 帧中位数、10 帧下限、余弦边界、save/load 校验、与特征库分离）、`test_bg_gate.py`（门命中检索/TTS 调用 0 次、裁剪 margin、门关等价、T_rt 不套静态阈值）、`test_pipeline.py` / `test_realtime.py` / `test_realtime_check.py` 适配新接口。
 

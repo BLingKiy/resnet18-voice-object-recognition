@@ -1,11 +1,26 @@
-# 核心依赖（必装）
-numpy>=1.23
-pillow>=10.0
-torch>=0.13
-torchvision>=0.13
-gradio>=4.0
+# RN18 交付依赖：版本全部钉死（与项目报告“锁定版本”口径一致）
+# torch / torchvision 为 CPU 版，只发布在 PyTorch 官方 CPU 源：
+#   单独安装必须带 --index-url https://download.pytorch.org/whl/cpu
+#   否则会装成 CUDA 版或版本不匹配。
+# 下面首行用 --extra-index-url 引入该源，同时保留 PyPI 取其余依赖，
+# 因此 `pip install -r requirements.txt` 一条命令即可装齐。
+--extra-index-url https://download.pytorch.org/whl/cpu
 
-# 语音链路（可选：缺省则降级为键盘录入 + 文本结果显示）
+# 核心（钉死版本）
+numpy==1.26.4
+pillow==10.4.0
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+gradio==4.44.1
+
+# 传递依赖钉住（否则 import gradio 会挂）
+huggingface_hub==0.36.0
+fastapi==0.115.6
+starlette==0.41.3
+uvicorn==0.32.1
+pydantic==2.10.4
+
+# 语音链路（可选，默认装齐；缺密钥时降级为键盘录入 + 文本结果）
 soundfile
 httpx
 edge-tts

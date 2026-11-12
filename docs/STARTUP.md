@@ -2,15 +2,21 @@
 
 > 本页是现场启动速查。完整说明见仓库根 [README.md](../README.md)，报告见 [REPORT.md](../REPORT.md)，演示顺序见 [docs/demo_script.md](demo_script.md)。
 > **交付包默认空库**：`data/features.json` 的 `objects` 为空、不含任何向量；程序启动不载入预置向量、不扫描样本目录。第一次打开要先现场录入物体。
+> **用虚拟环境**：交付包不含建好的 `.venv`，请按 §1 在本机现场生成，不要用系统 Python 直接 `pip install`。
 
-## 1. 环境安装（一次）
+## 1. 环境安装（一次 · 虚拟环境）
 
-前置条件：Python ≥ 3.10，CPU 版 torch / torchvision ≥ 0.13，numpy、Pillow、gradio ≥ 4；语音链路另需 soundfile / httpx / edge-tts。
+前置：Python 3.10+（本机 3.11.9 验证），已加入 PATH。**不要往系统 Python 直接 `pip install`**。
 
-```bash
-python -m venv .venv && .venv\Scripts\activate      # Windows
-pip install -r requirements.txt
+```bat
+setup_env.bat
 ```
+
+脚本依次做：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里钉死版本的依赖 → 验证 `import torch,torchvision,gradio` → 打印「环境就绪，运行 run.bat 启动」。每一步失败都会给中文提示并 `exit /b 1`。Linux/macOS 用等价的 `setup_env.sh`。
+
+> **PyTorch CPU 版**：`torch==2.2.2+cpu` / `torchvision==0.17.2+cpu` 只在 PyTorch 官方 CPU 索引发布，安装必须带 `--index-url https://download.pytorch.org/whl/cpu`，否则会装到 CUDA 版或不匹配版本。脚本与 `requirements.txt` 首行的 `--extra-index-url` 已自动处理。依赖锁定表见 README「环境安装」。
+
+下文所有 `python ...` 命令均默认已激活 `.venv`（Windows：`.venv\Scripts\activate.bat`），或显式写成 `.venv\Scripts\python.exe ...`。
 
 离线权重：把 `resnet18-f37072fd.pth` 放到
 `~/.cache/torch/hub/checkpoints/`（Linux/macOS）或
@@ -21,14 +27,17 @@ pip install -r requirements.txt
 
 ## 2. 启动
 
-```bash
-python app.py
-# 浏览器打开 http://127.0.0.1:7860
+```bat
+run.bat
 ```
+
+`run.bat` 激活 `.venv` 后运行 `python app.py`，浏览器打开 http://127.0.0.1:7860。
 
 界面三个 Tab：Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入（加分项）。
 
 ## 3. 首次使用（三步）
+
+快速路径回顾：`setup_env.bat` → `run.bat` → 空库现场录入（本节三步）。
 
 ```bash
 # 1) 空库启动：预期「物体数: 0   特征向量: 0」

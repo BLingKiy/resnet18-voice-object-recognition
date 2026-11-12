@@ -6,6 +6,21 @@
 >
 > 报告样本 41 张图放在 `samples/`（`known/` 25、`test/` 10、`unknown/` 6），**仅用于报告复现，不自动入库**，启动流程不读取它们。
 
+## 快速开始（虚拟环境 · 三步）
+
+交付包**不含**建好的 `.venv`（它写死绝对路径、torch CPU + gradio 有几百 MB，不能跨机器搬）。请在本机现场生成，三步即可演示：
+
+```bat
+setup_env.bat
+run.bat
+```
+
+1. `setup_env.bat`：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里**钉死版本**的依赖 → 验证 `import torch,torchvision,gradio` → 打印「环境就绪，运行 run.bat 启动」。任一步失败都会给中文提示并 `exit /b 1`。
+2. `run.bat`：激活 `.venv` 后 `python app.py`，浏览器打开 http://127.0.0.1:7860。
+3. **空库现场录入**：交付包默认空库，按下方「首次使用」三步录入新物体，然后识别/未知判断。
+
+Linux/macOS 用等价的 `setup_env.sh` / `run.sh`。**不要往系统 Python 直接 `pip install`**；下文所有 `python ...` 命令均默认已激活 `.venv`（Windows 用 `.venv\Scripts\activate.bat`，或显式写成 `.venv\Scripts\python.exe ...`）。
+
 ## 为什么有这个项目
 
 作业要求做一个"能认东西"的本地 Demo，但不能依赖在线识别接口、服务器或手机 App。我们选择 ResNet18 取 512 维特征 + 余弦相似度：模型本地跑、特征库就是一个 JSON 文件，**零部署、可离线、重启不丢数据**。语音识别只用百度短语音识别（录入名称），语音播报用 Edge TTS；缺密钥或依赖时降级为纯键盘操作。
@@ -53,27 +68,26 @@ python tools/demo_cli.py recognize --image my_object_test.jpg --top-k 3
 
 > 阈值 `0.8124` 是**课程 5 物体样本上校准的参考值**，不是通用常数。你现场录入的物体若与课程样本差异较大，建议用 `tools/calibrate.py` 以你自己的测试图重新校准（见「阈值与未知判断」）。
 
-## 环境安装
+## 环境安装（虚拟环境，一次）
 
-前置条件（带版本号）：
+**不再建议用系统 Python 直接 `pip install`**。依赖版本全部钉死在 `requirements.txt`（与项目报告「锁定版本」口径一致），由 `setup_env.bat` 在本机一键装进 `.venv`：
 
-| 依赖 | 版本要求 | 说明 |
+| 依赖 | 钉死版本 | 说明 |
 |------|----------|------|
-| Python | ≥ 3.10 | 用了 `X | None` 类型写法和 `dataclass(slots=True)` |
-| torch / torchvision | ≥ 0.13 | 必须 **CPU 版**；需要 `torchvision.models.ResNet18_Weights` |
-| numpy | ≥ 1.23 | 特征计算 |
-| Pillow | 最新 | 图片解码与预处理 |
-| gradio | ≥ 4 | 图形界面（Tab1 录入 / Tab2 识别 / Tab3 实时+教学） |
-| soundfile / httpx | 最新 | **语音识别**才需要（百度 ASR）；缺了也能跑键盘模式 |
-| edge-tts | 最新 | **语音播报**才需要；缺了也能跑纯文本模式 |
+| Python | 3.10+（本机 3.11.9 验证） | 用于建 `.venv` |
+| numpy | 1.26.4 | torch 2.2.2 不能配 numpy 2.x，会报 `_ARRAY_API not found` |
+| pillow | 10.4.0 | 图片解码与预处理 |
+| torch / torchvision | 2.2.2+cpu / 0.17.2+cpu | **CPU 版**，走 PyTorch 官方 CPU 索引 |
+| gradio | 4.44.1 | 图形界面（Tab1 录入 / Tab2 识别 / Tab3 实时+教学） |
+| huggingface_hub / fastapi / starlette / uvicorn / pydantic | 0.36.0 / 0.115.6 / 0.41.3 / 0.32.1 / 2.10.4 | 传递依赖钉住，否则 `import gradio` 会挂 |
+| soundfile / httpx / edge-tts | 可选（默认装齐） | 语音识别/播报；缺密钥时降级为键盘录入 + 文本结果 |
+| pytest | ≥ 7.0 | 测试 |
 
-安装（pip，任选其一）：
-
-```bash
-pip install numpy pillow torch torchvision gradio
-# 语音链路（可选，缺省则降级为键盘录入 + 文本结果显示）
-pip install soundfile httpx edge-tts
+```bat
+setup_env.bat
 ```
+
+> **PyTorch CPU 版**：`torch==2.2.2+cpu` / `torchvision==0.17.2+cpu` 只发布在 PyTorch 官方 CPU 索引，必须带 `--index-url https://download.pytorch.org/whl/cpu`，否则会装到 CUDA 版或不匹配版本。脚本已自动处理；`requirements.txt` 首行也用 `--extra-index-url` 引入该源，使 `pip install -r requirements.txt` 一条命令即可装齐。
 
 > 离线权重拷贝：若目标机器无法联网，把 `resnet18-f37072fd.pth` 放到
 > `~/.cache/torch/hub/checkpoints/`（Linux/macOS）或
@@ -82,12 +96,11 @@ pip install soundfile httpx edge-tts
 
 ## 启动图形界面
 
-```bash
-python app.py
-# 浏览器打开 http://127.0.0.1:7860
+```bat
+run.bat
 ```
 
-界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入（加分项）。
+`run.bat` 激活 `.venv` 后运行 `python app.py`，浏览器打开 http://127.0.0.1:7860。界面为 Tab1 多图录入、Tab2 单图识别、Tab3 摄像头实时识别与教学式录入（加分项）。
 
 ## 演示前检查
 
@@ -278,7 +291,7 @@ python tools/realtime_check.py --camera 0 --seconds 30 \
 
 输出包含：空场景 `bg_sim` 的 min/median/max、空场景最高候选分与超过 `T_rt` 的误报次数、每个物体在场时的分数 min/median/max、当前三个阈值以及 `T_bg`/`T_rt` 是否可分的判定。
 
-`--camera` 模式需要 `pip install opencv-python`（**仅自检脚本**需要，应用本身不依赖 opencv；没有摄像头/没装 opencv 时脚本会给出明确报错并建议改用 `--frames`，不会静默卡住）。`--write` 只写 `data/realtime.json`，不动 `features.json`；两分布重叠时脚本**不给数字**，直接要求重拍，避免把拍脑袋的值写进配置。
+`--camera` 模式需要 `.venv\Scripts\python -m pip install opencv-python`（**仅自检脚本**需要，应用本身不依赖 opencv；没有摄像头/没装 opencv 时脚本会给出明确报错并建议改用 `--frames`，不会静默卡住）。`--write` 只写 `data/realtime.json`，不动 `features.json`；两分布重叠时脚本**不给数字**，直接要求重拍，避免把拍脑袋的值写进配置。
 
 ## 数据与特征库格式
 
