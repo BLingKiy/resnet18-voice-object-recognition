@@ -1,0 +1,6 @@
+# 行尾策略：发布包里的启动脚本必须字节精确，避免换行符被二次转换。
+# .bat 由 cmd 执行，必须是 CRLF 且纯 ASCII；-text 让 Git 不做任何换行转换，
+# 仓库里的 blob 与发布包里的文件逐字节一致。
+*.bat -text
+# .sh 由 bash 执行，必须是 LF；Windows 上检出时也不能变成 CRLF。
+*.sh text eol=lf

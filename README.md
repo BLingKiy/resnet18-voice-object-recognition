@@ -15,11 +15,27 @@ setup_env.bat
 run.bat
 ```
 
-1. `setup_env.bat`：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里**钉死版本**的依赖 → 验证 `import torch,torchvision,gradio` → 打印「环境就绪，运行 run.bat 启动」。任一步失败都会给中文提示并 `exit /b 1`。
+1. `setup_env.bat`：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里**钉死版本**的依赖 → 验证 `import torch,torchvision,gradio` → 打印 `Done. Run run.bat to launch the GUI.`。任一步失败都会打印 `[ERROR] ...` 并 `exit /b 1`；脚本正文是纯 ASCII、CRLF 行尾（见下方「启动脚本说明」）。
 2. `run.bat`：激活 `.venv` 后 `python app.py`，浏览器打开 http://127.0.0.1:7860。
 3. **空库现场录入**：交付包默认空库，按下方「首次使用」三步录入新物体，然后识别/未知判断。
 
 Linux/macOS 用等价的 `setup_env.sh` / `run.sh`。**不要往系统 Python 直接 `pip install`**；下文所有 `python ...` 命令均默认已激活 `.venv`（Windows 用 `.venv\Scripts\activate.bat`，或显式写成 `.venv\Scripts\python.exe ...`）。
+
+### 启动脚本说明
+
+四个启动脚本（`setup_env.bat` / `run.bat` / `setup_env.sh` / `run.sh`）的正文都是**纯 ASCII**，`.bat` 为 CRLF 行尾、`.sh` 为 LF 行尾，仓库里用 `.gitattributes` 固定这套规则，避免换行或编码在别的机器上被二次转换。因此提示语是英文，对照如下。脚本只管建环境与启动，不参与识别，改不改都不影响算法与阈值（`0.8124` / `0.75` / `0.90` / `0.05`）。
+
+| 提示 | 含义 |
+| --- | --- |
+| `[1/6] Checking Python ...` | 检查 Python 在不在 PATH（需要 3.10+） |
+| `[2/6] Creating virtual environment .venv ...` | 创建 `.venv`；已存在则跳过 |
+| `[3/6] Upgrading pip ...` | 升级 pip |
+| `[4/6] Installing PyTorch CPU build ...` | 从 PyTorch 官方 CPU 源装 `torch` / `torchvision` |
+| `[5/6] Installing requirements.txt ...` | 装齐其余钉死版本的依赖 |
+| `[6/6] Verifying imports ...` | 验证 `import torch, torchvision, gradio, numpy` |
+| `Done. Run run.bat to launch the GUI.` | 环境就绪，运行 `run.bat` |
+| `Activating .venv and starting the RN18 GUI ...` | 正在激活 `.venv` 并启动界面 |
+| `[ERROR] ...` | 对应哪一步失败，按提示重试；`.venv` 损坏时删掉整个 `.venv` 重跑 `setup_env.bat` |
 
 ## 为什么有这个项目
 
@@ -135,6 +151,8 @@ python tools/calibrate.py --known-dir samples/test --unknown-dir samples/unknown
 ```
 
 > 特征库默认路径是仓库内 `data/features.json`（交付包为空库）。用 `--library` 或环境变量 `RN18_LIBRARY_PATH` 可指向其它文件；一台机器上只用一个库，不要混用。
+>
+> **`schema` 字段必须与代码一致**：`core/library.py` 的 `SCHEMA_NAME` 是 `rn18-feature-library`，加载时严格校验。若你手上有一份更早的特征库，加载会报「不是本程序的特征库文件」，把该文件顶层的 `schema` 值改成与 `SCHEMA_NAME` 一致的字符串即可，其余字段（`version` / `dim` / `objects` 等）不用动。交付包本身是空库，首次打开手动录入，不受影响。
 
 所有命令都支持 `--json`，便于把结果贴进报告或做自动化断言。
 

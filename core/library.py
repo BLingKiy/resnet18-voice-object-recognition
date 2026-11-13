@@ -3,7 +3,7 @@
 存储格式（版本 1）::
 
     {
-      "schema": "hifox-resnet18-feature-library",
+      "schema": "rn18-feature-library",
       "version": 1,
       "model": "resnet18-imagenet1k-v1",
       "dim": 512,
@@ -57,7 +57,7 @@ from .features import (
     to_pil,
 )
 
-SCHEMA_NAME = "hifox-resnet18-feature-library"
+SCHEMA_NAME = "rn18-feature-library"
 SCHEMA_VERSION = 1
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

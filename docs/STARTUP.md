@@ -12,7 +12,10 @@
 setup_env.bat
 ```
 
-脚本依次做：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里钉死版本的依赖 → 验证 `import torch,torchvision,gradio` → 打印「环境就绪，运行 run.bat 启动」。每一步失败都会给中文提示并 `exit /b 1`。Linux/macOS 用等价的 `setup_env.sh`。
+脚本依次做：`python -m venv .venv` → 升级 pip → 装齐 `requirements.txt` 里钉死版本的依赖 → 验证 `import torch,torchvision,gradio` → 打印 `Done. Run run.bat to launch the GUI.`。每一步失败都会打印 `[ERROR] ...` 并 `exit /b 1`。Linux/macOS 用等价的 `setup_env.sh`。
+
+> **脚本正文是纯 ASCII**：`setup_env.bat` / `run.bat` 为 CRLF 行尾，`setup_env.sh` / `run.sh` 为 LF 行尾，由仓库根 `.gitattributes` 固定。提示语是英文，逐条中文对照见 [README「启动脚本说明」](../README.md#启动脚本说明)。这样做是为了保证脚本在别的机器上逐字节不变：命令里只要混进一个非 ASCII 或控制字节，`cmd` 就会把 `activate.bat` 解析成别的文件名，激活直接失败。
+
 
 > **PyTorch CPU 版**：`torch==2.2.2+cpu` / `torchvision==0.17.2+cpu` 只在 PyTorch 官方 CPU 索引发布，安装必须带 `--index-url https://download.pytorch.org/whl/cpu`，否则会装到 CUDA 版或不匹配版本。脚本与 `requirements.txt` 首行的 `--extra-index-url` 已自动处理。依赖锁定表见 README「环境安装」。
 
@@ -65,3 +68,4 @@ python tools/demo_cli.py recognize --image my_object_test.jpg --top-k 3
 - **识别提示"特征库为空"**：正常，交付包是空库，先按 §3 录入。
 - **播报没声音**：Edge TTS 需联网，断网时界面显示「语音播报不可用，请检查网络」，识别结果照常。检查音量不为 0。
 - **命令行换库**：用 `--library` 或环境变量 `RN18_LIBRARY_PATH` 指定其它 JSON；一台机器只用一个库，不要混用。
+- **提示「不是本程序的特征库文件」**：`features.json` 顶层的 `schema` 与 `core/library.py` 的 `SCHEMA_NAME`（`rn18-feature-library`）不一致。把该字段改成与 `SCHEMA_NAME` 相同的字符串即可，`version` / `dim` / `objects` 等不用动；交付包是空库，首次录入不会遇到这个问题。

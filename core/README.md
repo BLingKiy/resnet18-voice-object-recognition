@@ -71,7 +71,7 @@ for row in library.stats():
 
 ```json
 {
-  "schema": "hifox-resnet18-feature-library",
+  "schema": "rn18-feature-library",
   "version": 1,
   "model": "resnet18-imagenet1k-v1",
   "dim": 512,
