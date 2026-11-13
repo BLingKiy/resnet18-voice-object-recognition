@@ -240,10 +240,10 @@ RUN_RESNET_TESTS=1 python -m pytest tests -q  # 含真实权重端到端
 
 | 成员 | 主要分工 |
 |---|---|
-| 成员一 安效甲（组长） | 总体方案设计与核心识别算法：ResNet18 特征提取（去掉 fc 层、512 维、L2 归一化）、余弦相似度检索、未知判断、阈值校准。负责 `core/features.py`、`core/recognize.py`、`tools/calibrate.py` 及对应单测，并统稿项目报告 |
-| 成员二 何成 | 特征库与数据：JSON 特征库逐条存向量、原子写入与重启加载；课程数据集（5 物体 × 5 张注册图、独立测试图、3 类未录入物体）采集整理与 `manifest.csv`。负责 `core/library.py`、`tools/demo_cli.py` 及对应单测 |
-| 成员三 陈智豪 | 界面与现场演示：Gradio 三标签页（录入 / 静态识别 / 实时识别）、录入与识别事件链、结果标注图。负责 `app.py`、`core/visualize.py`、`docs/demo_script.md` 及界面事件测试 |
-| 成员四 卢瑞涛 | 语音与实时链路：百度短语音识别（16 kHz 重采样）、Edge TTS 播报与节流、摄像头实时识别与教学式录入、背景自适应。负责 `voice/asr.py`、`voice/tts.py`、`core/pipeline.py`、`core/background.py` 及对应单测 |
+| 成员一 安效甲（组长） | 核心识别算法与阈值：ResNet18 特征提取（去 fc、512 维、L2 归一化）、余弦检索、未知判断、阈值校准与未知拒识复核。负责 `core/features.py`、`core/recognize.py`、`tools/calibrate.py`、`tools/unknown_check.py`、`core/__init__.py` 及对应单测，并统稿项目报告 |
+| 成员二 何成 | 特征库与数据：JSON 特征库逐条存向量、原子写入、重启加载与完整性校验；课程数据集（5 物体 × 5 张注册图、独立测试图、3 类未录入物体）采集清洗与 `manifest.csv`；`docs/evidence/` 证据归档；命令行验收入口。负责 `core/library.py`、`tools/demo_cli.py` 及对应单测 |
+| 成员三 陈智豪 | 界面与实时配置：Gradio 三标签页（录入 / 静态识别 / 实时识别）、录入与识别事件链、Top-K 与标注结果的界面呈现；三个阈值与背景门开关的读写；实时链路证据脚本。负责 `app.py`、`core/realtime_config.py`、`tools/p5_evidence.py`、`docs/demo_script.md` 及界面事件测试 |
+| 成员四 卢瑞涛 | 语音与实时链路：百度短语音识别（16 kHz 重采样、token 缓存与重试）、Edge TTS 播报与节流、识别流水线与结果标注绘制、摄像头背景自适应、实时阈值自检、语音链路正确率验证。负责 `voice/asr.py`、`voice/tts.py`、`voice/__init__.py`、`core/pipeline.py`、`core/background.py`、`tools/realtime_check.py`、`tools/tts_asr_check.py` 及对应单测 |
 
 > 集成联调、单元与端到端测试、运行说明与项目报告由四人共同复核，安效甲统稿。
 

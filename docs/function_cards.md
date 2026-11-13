@@ -1,6 +1,6 @@
 # 关键函数讲解卡（教师随机抽问用）
 
-> 每个函数给出：**文件路径 + 实际函数签名（参数名、默认值、返回类型）**、输入输出、设计理由、被抽问时怎么答。签名逐字对照 `core/features.py`、`core/library.py`、`core/recognize.py`、`core/pipeline.py`、`voice/asr.py`、`voice/tts.py`。
+> 每个函数给出：**文件路径 + 实际函数签名（参数名、默认值、返回类型）**、输入输出、设计理由、被抽问时怎么答。签名逐字对照 `app.py`、`core/features.py`、`core/library.py`、`core/recognize.py`、`core/realtime_config.py`、`core/pipeline.py`、`voice/asr.py`、`voice/tts.py`。
 > 阈值口径：**`0.8124`** 是在课程 5 物体样本上校准的**参考值**，存在特征库 JSON 的 `threshold` 字段，程序优先用它；现场录入的物体若与课程样本差异较大，建议用 `tools/calibrate.py` 重新校准。`core/recognize.py` 里的 `DEFAULT_THRESHOLD = 0.60` 只是"库未校准"时的代码兜底，不是本项目结论；`data/realtime.json` 的 0.75 / 0.90 / 0.05 是**未在标准流程下校准的占位值**。
 > 交付包默认空库：`data/features.json` 的 `objects` 为空、不含任何向量，程序启动不载入预置向量，首次使用需现场录入物体。
 
@@ -176,6 +176,64 @@ def recognize_stream(
 - **输入**：一帧画面、特征库、可选背景模型与三个实时阈值。**输出**：`StreamResult`，含 `recognition`、`annotated`、`state`（`known`/`unknown`/`no_object`）、`source`（`full`/`crop`）、`bg_sim`、`score`、`threshold_used`、`speech`。
 - **为什么这样设计**：参数全部是带默认值的关键字参数，旧调用点只传 `frame, library` 时 `bg_model=None`，完整退回旧单路识别；`bg_gate_enabled=False` 同样退回旧路径，用于现场对照。背景门命中时直接返回 `no_object`，不调用物体检索、不生成播报文本，`speech=""`。裁剪只在「裁剪分 - 全帧分 > margin」时采用，判未知统一用 `t_rt`，不套静态阈值 0.8124。
 - **被抽问怎么答**：为什么不直接套 0.8124？——静态图整幅都是物体，实时帧物体只占一部分，分数整体偏低；T_rt 必须真机校准。为什么门命中不检索？——背景不是物体，检索只会制造误报，还浪费一次前向。关闭开关后行为变吗？——不变，逐帧等价于 P5.1 之前。
+
+---
+
+## 7d. `app.enroll_images`（Tab1 录入事件链）
+
+**文件**：`app.py`（第 368–419 行）
+
+```python
+def enroll_images(
+    name: str,
+    files: Sequence[Any] | str | Path | None,
+    *,
+    library: FeatureLibrary | None = None,
+    encoder: Encoder | None = None,
+) -> tuple[str, list[list[str]], str]:
+```
+
+- **输入**：名称框文本、上传的一张或多张图（Gradio 文件对象 / 路径 / 字符串）、可选库与编码器（`None` = 进程内共享库 + 真实 ResNet18）。**输出**：`(状态 Markdown, 特征库表格行, 特征库概况)`。
+- **关键行**：`390` 名称 `strip()`；`394` `_file_paths()` 把 Gradio 的临时文件对象归一成 `Path`；`399-402` 持 `_STORE_LOCK` 调 `add_to_library()`，只有 `result.added > 0` 才 `save_library()`；`403-405` 异常收口成 `❌ 录入失败：<类型>: <信息>`；`419` 重新取表格与概况。
+- **为什么这样设计**：① 名称与图片在入库前就拦下（缺名称、缺图片直接返回提示），避免把空名称写进特征库、也避免 `add_to_library` 抛异常；② 写盘与入库成对且放在同一把锁里，`added > 0` 才落盘——重复点「录入」不会反复改写 JSON，`added=0` 只提示"5 张图都已在库中"。
+- **改了会怎样**：去掉 `strip()` 会造出 `" 苹果"` 与 `"苹果"` 两个物体；把 `save_library()` 挪到 `try` 外，写盘失败就成了界面上的红色堆栈；改成无条件落盘，重复录入会把文件 mtime 与内容反复刷写。
+- **被抽问怎么答**：为什么返回表格而不是 `gr.update`？——一次录入要同时刷新状态、表格、概况三个输出，直接返回数据最直白。重复图会重复计数吗？——不会，`add_to_library` 按解码后 RGB 像素的 SHA-256 在同一物体内去重。
+
+---
+
+## 7e. `app.RealtimeController.process`（实时帧处理）
+
+**文件**：`app.py`（第 1088–1227 行）
+
+```python
+def process(self, frame: Any) -> FrameOutcome:
+```
+
+- **输入**：一帧画面（numpy / PIL / 路径），`None` 表示这一拍没有新画面。**输出**：`FrameOutcome`（`annotated`、`headline`、`stats`、`audio_path`、`tts_status`、`teaching_hint`、`gate_spoken`、`is_background`）；`annotated=None` 表示前端保留上一帧。
+- **关键行**：`1125-1134` 教学态优先——只 `_offer_frame_locked()` 抓帧，不识别、不播报；`1148-1160` 背景学习优先——先收 20 帧（丢前 2 帧）建当前机位背景，期间不检索；`1165-1175` 按 `min_interval = REALTIME_STREAM_EVERY = 0.3` 秒节流，未满就返回上一次结论；`1178-1187` 调 `recognize_stream()` 并传入 `t_bg` / `t_rt` / `bg_gate_enabled` / `bg_crop_margin`；`1210-1216` 只有 `stream.speech` 非空且 `SpeechGate.should_speak()` 通过才播。
+- **为什么这样设计**：① 状态判定顺序固定为「教学 → 背景学习 → 节流 → 识别」，因为教学和学背景期间拿着有物体的帧去检索只会污染证据与背景缓冲；② 播报条件不看"识别到了什么"，只看 `stream.speech`——背景门命中时 `speech=""`，于是既不合成也不播报，不会冒出"未知物体"的语音。
+- **改了会怎样**：把节流去掉，`recognize_stream` 会跟着前端推帧频率跑，CPU 占用翻几倍且播报判定抖动；把教学判断挪到节流之后，教学抓帧会被 0.3 s 节流挡掉，5 张图抓不满。
+- **被抽问怎么答**：为什么单帧异常不往上抛？——Gradio 的 stream 回调里抛异常会变成红色堆栈并可能中断整条流，这里统一收口成文案，Tab1/Tab2 不受影响。播报为什么会重复？——`SpeechGate` 要求"文本变化 且 4 秒冷却已过"，只改冷却时间就能调松紧。
+
+---
+
+## 7f. `core.realtime_config.load_realtime_config`（三阈值读取）
+
+**文件**：`core/realtime_config.py`（第 156–210 行）
+
+```python
+def load_realtime_config(
+    path: str | Path | None = None,
+    *,
+    library: Any | None = None,
+) -> RealtimeConfig:
+```
+
+- **输入**：配置文件路径（默认 `data/realtime.json`）、可选特征库。**输出**：`RealtimeConfig`（`threshold_static`、`threshold_realtime`、`threshold_bg`、`bg_crop_margin`、`bg_gate_enabled`）。
+- **关键行**：`176-177` 文件不存在时直接返回 `RealtimeConfig.defaults(library, bg_gate_enabled=True)`，**不自动写盘**；`181-187` 校验 `schema` 与 `version`，不匹配抛 `ValueError`；`190-194` 传了 `library` 就 `resolve_threshold(library)`，否则才读文件里的 `threshold_static`；`198-209` 其余三个键各自 `_number()` 兜底。
+- **为什么这样设计**：① 静态阈值的真值只有一处——特征库 JSON 的 `threshold`（0.8124），配置文件里那个键只是镜像，传了库就以库为准，避免两个数字打架；② 缺失字段走默认值而不是报错，配置文件被手改删掉一个键仍能启动，但 schema/version 不对就直接拒绝，防止把别的程序的 JSON 当配置读进来。
+- **改了会怎样**：把 `library` 分支去掉，界面改过 `realtime.json` 的 `threshold_static` 后会与库里 0.8124 不一致，静态识别和实时识别用两个阈值判同一张图；把 `version` 校验去掉，旧格式配置会静默读成默认值。
+- **被抽问怎么答**：0.75 / 0.90 / 0.05 是校准结果吗？——不是，是未在标准流程下校准的占位值，`tools/realtime_check.py` 才给建议值。为什么三个阈值不合成一个？——静态图整幅是物体、实时帧物体只占一部分，分数分布不同，必须分开校准。
 
 ---
 
